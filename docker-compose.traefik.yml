@@ -1,0 +1,33 @@
+version: "3.8"
+
+services:
+  antoni-ia-api:
+    # Conecta a la red proxy para Traefik y macvlan_local para Wake-on-LAN
+    networks:
+      - proxy
+      - macvlan_local
+
+    # Puerto interno del contenedor (Traefik se encarga del routing externo)
+    ports:
+      - "8000:8000"
+
+    # Configuración de Traefik con redirección HTTP -> HTTPS
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.antoni-ia-api.loadbalancer.server.port=8000
+
+      # Router HTTP (redirige a HTTPS)
+      - traefik.http.routers.antoni-ia-api.entrypoints=web
+      - traefik.http.routers.antoni-ia-api.rule=Host(`${SUBDOMINIO}`)
+      - traefik.http.middlewares.antoni-ia-api-https-redirect.redirectscheme.scheme=websecure
+      - traefik.http.routers.antoni-ia-api.middlewares=antoni-ia-api-https-redirect
+
+      # Router HTTPS (seguro)
+      - traefik.http.routers.antoni-ia-api-secure.entrypoints=websecure
+      - traefik.http.routers.antoni-ia-api-secure.rule=Host(`${SUBDOMINIO}`)
+      - traefik.http.routers.antoni-ia-api-secure.tls=true
+      - traefik.http.routers.antoni-ia-api-secure.tls.certresolver=letsencrypt
+
+networks:
+  macvlan_local:
+    external: true

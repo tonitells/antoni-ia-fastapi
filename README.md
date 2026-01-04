@@ -72,9 +72,52 @@ SUBDOMINIO=ia-api.tudominio.com
 
 ### 3. Construir y ejecutar con Docker Compose
 
+#### Opción A: Con Traefik + Wake-on-LAN (configuración recomendada)
+
 ```bash
-docker-compose up -d --build
+# 1. Asegúrate de que la red proxy existe
+docker network create proxy
+
+# 2. Crea la red macvlan para Wake-on-LAN (solo una vez)
+# Reemplaza 'enp45s0' con tu interfaz de red principal
+# Reemplaza '192.168.1.230' con la IP de tu servidor
+docker network create -d macvlan \
+  --subnet=192.168.1.0/24 \
+  --gateway=192.168.1.1 \
+  --ip-range=192.168.1.240/28 \
+  --aux-address="host=192.168.1.230" \
+  -o parent=enp45s0 \
+  macvlan_local
+
+# 3. Iniciar el servicio con configuración de Traefik
+docker-compose -f docker-compose.yml -f docker-compose.traefik.yml up -d
+
+# Ver logs en tiempo real
+docker-compose logs -f
 ```
+
+**Nota**:
+- La red `macvlan_local` permite que el contenedor tenga acceso directo a la red local para enviar paquetes Wake-on-LAN
+- El contenedor tendrá dos IPs: una en la red proxy (para Traefik) y otra en la red local (para WOL)
+- Esta configuración permite usar **tanto Traefik (HTTPS) como Wake-on-LAN simultáneamente**
+- Para encontrar tu interfaz de red: `ip route | grep default`
+
+#### Opción B: Modo Host (alternativa simple, sin Traefik)
+
+```bash
+# Iniciar con modo host (WOL sin necesidad de configurar macvlan)
+docker-compose -f docker-compose.yml -f docker-compose.host.yml up -d
+
+# Ver logs en tiempo real
+docker-compose logs -f
+```
+
+**Nota**: En modo host:
+- Wake-on-LAN funciona sin configuración adicional
+- No requiere configurar red macvlan
+- La API estará disponible en `http://IP_SERVIDOR:8000`
+- **No es compatible con Traefik** (no puede rutear contenedores en modo host)
+- Usa esta opción si no necesitas HTTPS/dominio personalizado
 
 ### 4. Verificar que está funcionando
 

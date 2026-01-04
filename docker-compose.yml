@@ -8,23 +8,10 @@ services:
       - .env
     restart: unless-stopped
 
-    # OPCIÓN 1: Red host (recomendado para Wake-on-LAN)
-    # Usa la red del host directamente, necesario para que WOL funcione correctamente
-    # Incompatible con Traefik - usar puerto directo 8000
-    network_mode: host
-
-    # OPCIÓN 2: Red bridge con Traefik (comentar network_mode: host arriba)
-    # Si usas Traefik, descomenta las líneas siguientes y comenta network_mode: host
-    # Nota: WOL puede no funcionar correctamente con esta configuración
-    # networks:
-    #   - traefik
-    # labels:
-    #   - "traefik.enable=true"
-    #   - "traefik.http.routers.antoni-ia-api.rule=Host(`${SUBDOMINIO}`)"
-    #   - "traefik.http.routers.antoni-ia-api.entrypoints=websecure"
-    #   - "traefik.http.routers.antoni-ia-api.tls.certresolver=letsencrypt"
-    #   - "traefik.http.services.antoni-ia-api.loadbalancer.server.port=8000"
-
-# networks:
-#   traefik:
-#     external: true
+    # Configuración de red y puertos se define en los archivos de override:
+    # - docker-compose.traefik.yml: Para usar con Traefik (red proxy)
+    # - docker-compose.host.yml: Para modo host (WOL)
+  
+networks:
+  proxy:
+    external: true
