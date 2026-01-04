@@ -51,6 +51,7 @@ WOL_PORT=9
 # Configuración SSH
 SSH_USER=tu_usuario
 SSH_PASS=tu_contraseña
+SSH_SUDO_PASS=tu_contraseña_sudo
 SSH_PORT=22
 
 # API Keys (separadas por comas si son múltiples)
@@ -64,6 +65,10 @@ SUBDOMINIO=ia-api.tudominio.com
 - `WOL_BROADCAST`: Dirección de broadcast de tu red. Para una red `192.168.1.x`, usa `192.168.1.255`
 - Si ejecutas desde Docker, el `docker-compose.yml` está configurado con `network_mode: host` para que WOL funcione correctamente
 - Si necesitas usar Traefik, consulta la sección "Configuración de red para Wake-on-LAN" más abajo
+
+**IMPORTANTE para SSH:**
+- `SSH_SUDO_PASS`: Contraseña de sudo (puede ser diferente a la de SSH). Si no se especifica, usa la misma que `SSH_PASS`
+- Si el apagado falla, verifica que el usuario tenga permisos sudo o configura sudo sin contraseña (ver sección de solución de problemas)
 
 ### 3. Construir y ejecutar con Docker Compose
 

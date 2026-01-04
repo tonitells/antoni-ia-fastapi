@@ -25,6 +25,7 @@ IA_MAC = os.getenv("IA_MAC")
 OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
 SSH_USER = os.getenv("SSH_USER")
 SSH_PASS = os.getenv("SSH_PASS")
+SSH_SUDO_PASS = os.getenv("SSH_SUDO_PASS", SSH_PASS)  # Por defecto usa el mismo que SSH
 SSH_PORT = int(os.getenv("SSH_PORT", "22"))
 API_KEYS = os.getenv("API_KEYS", "").split(",")
 # Dirección de broadcast para Wake-on-LAN (por defecto usa la de la red del equipo)
@@ -100,6 +101,10 @@ async def debug_info():
             "EQUIPO_IA": EQUIPO_IA,
             "IA_MAC": IA_MAC,
             "OLLAMA_PORT": OLLAMA_PORT,
+            "SSH_PORT": SSH_PORT,
+            "SSH_USER": SSH_USER,
+            "SSH_PASS_SET": bool(SSH_PASS),
+            "SSH_SUDO_PASS_SET": bool(SSH_SUDO_PASS),
             "WOL_BROADCAST": WOL_BROADCAST,
             "WOL_PORT": WOL_PORT
         }
@@ -223,8 +228,8 @@ async def apagar_equipo():
         stdin, stdout, stderr = ssh.exec_command("sudo shutdown -h now", get_pty=True)
 
         # Si se requiere contraseña para sudo, enviarla
-        if SSH_PASS:
-            stdin.write(SSH_PASS + '\n')
+        if SSH_SUDO_PASS:
+            stdin.write(SSH_SUDO_PASS + '\n')
             stdin.flush()
 
         # Esperar un momento para que el comando se procese
