@@ -136,7 +136,7 @@ dmypy.json
 cython_debug/
 
 # IDEs
-.vscode/
+# .vscode/ - VSCode config is committed for team collaboration
 .idea/
 *.swp
 *.swo
