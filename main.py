@@ -7,6 +7,7 @@ import httpx
 import asyncio
 from wakeonlan import send_magic_packet
 import paramiko
+import socket
 
 load_dotenv()
 
@@ -38,6 +39,29 @@ async def verify_api_key(api_key: str = Security(API_KEY_HEADER)):
             detail="Invalid or missing API Key"
         )
     return api_key
+
+
+async def check_host_connectivity(host: str, port: int = 22, timeout: float = 2.0) -> bool:
+    """
+    Verifica si un host está online intentando conectarse a un puerto TCP.
+    Por defecto usa el puerto SSH (22) que suele estar abierto.
+    """
+    try:
+        # Ejecutar la conexión en un executor para no bloquear
+        loop = asyncio.get_event_loop()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+
+        await loop.run_in_executor(None, sock.connect, (host, port))
+        sock.close()
+        return True
+    except (socket.timeout, socket.error, OSError):
+        return False
+    finally:
+        try:
+            sock.close()
+        except:
+            pass
 
 
 class StatusResponse(BaseModel):
@@ -120,29 +144,15 @@ async def test_ia():
     ollama_online = False
     mensaje = ""
 
-    # Verificar si el equipo está encendido (ping)
+    # Verificar si el equipo está encendido (conexión TCP al puerto SSH)
     try:
-        if os.name == 'nt':  # Windows
-            cmd = f"ping -n 1 -w 2000 {EQUIPO_IA}"
-        else:  # Linux/Mac/Docker
-            cmd = f"ping -c 1 -W 2 {EQUIPO_IA}"
-
-        process = await asyncio.create_subprocess_shell(
-            cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-
-        stdout, stderr = await process.communicate()
-        equipo_online = process.returncode == 0
+        equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
 
         if not equipo_online:
-            # Ping falló - proporcionar más información
-            mensaje = f"Ping falló (código {process.returncode}). "
-            if stderr:
-                mensaje += f"Error: {stderr.decode().strip()[:100]}"
+            mensaje = f"Equipo no accesible en {EQUIPO_IA}:{SSH_PORT}"
     except Exception as e:
-        mensaje = f"Error al ejecutar ping: {str(e)}"
+        mensaje = f"Error al verificar conectividad: {str(e)}"
+        equipo_online = False
 
     # Verificar si Ollama está respondiendo
     if equipo_online:
@@ -155,7 +165,7 @@ async def test_ia():
                 else:
                     mensaje = f"Equipo online pero Ollama respondió con código {response.status_code}"
         except httpx.ConnectError as e:
-            mensaje = f"Equipo online pero no se puede conectar a Ollama: {str(e)}"
+            mensaje = f"Equipo online pero no se puede conectar a Ollama en puerto {OLLAMA_PORT}"
         except httpx.TimeoutException:
             mensaje = f"Equipo online pero Ollama no responde (timeout)"
         except Exception as e:
