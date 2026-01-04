@@ -60,6 +60,56 @@ async def root():
     }
 
 
+@app.get("/debug", dependencies=[Security(verify_api_key)])
+async def debug_info():
+    """
+    Endpoint de debug para diagnosticar problemas de conectividad.
+    Requiere API Key en header X-API-Key.
+    """
+    import platform
+
+    debug_data = {
+        "os_name": os.name,
+        "platform": platform.system(),
+        "python_version": platform.python_version(),
+        "config": {
+            "EQUIPO_IA": EQUIPO_IA,
+            "IA_MAC": IA_MAC,
+            "OLLAMA_PORT": OLLAMA_PORT,
+            "WOL_BROADCAST": WOL_BROADCAST,
+            "WOL_PORT": WOL_PORT
+        }
+    }
+
+    # Test ping manualmente
+    try:
+        if os.name == 'nt':
+            cmd = f"ping -n 1 -w 2000 {EQUIPO_IA}"
+        else:
+            cmd = f"ping -c 1 -W 2 {EQUIPO_IA}"
+
+        process = await asyncio.create_subprocess_shell(
+            cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+        stdout, stderr = await process.communicate()
+
+        debug_data["ping_test"] = {
+            "command": cmd,
+            "returncode": process.returncode,
+            "stdout": stdout.decode().strip(),
+            "stderr": stderr.decode().strip() if stderr else ""
+        }
+    except Exception as e:
+        debug_data["ping_test"] = {
+            "error": str(e)
+        }
+
+    return debug_data
+
+
 @app.get("/test", response_model=StatusResponse, dependencies=[Security(verify_api_key)])
 async def test_ia():
     """
@@ -73,33 +123,44 @@ async def test_ia():
     # Verificar si el equipo está encendido (ping)
     try:
         if os.name == 'nt':  # Windows
-            response = await asyncio.create_subprocess_shell(
-                f"ping -n 1 -w 1000 {EQUIPO_IA}",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-        else:  # Linux/Mac
-            response = await asyncio.create_subprocess_shell(
-                f"ping -c 1 -W 1 {EQUIPO_IA}",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
+            cmd = f"ping -n 1 -w 2000 {EQUIPO_IA}"
+        else:  # Linux/Mac/Docker
+            cmd = f"ping -c 1 -W 2 {EQUIPO_IA}"
 
-        await response.communicate()
-        equipo_online = response.returncode == 0
+        process = await asyncio.create_subprocess_shell(
+            cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+        stdout, stderr = await process.communicate()
+        equipo_online = process.returncode == 0
+
+        if not equipo_online:
+            # Ping falló - proporcionar más información
+            mensaje = f"Ping falló (código {process.returncode}). "
+            if stderr:
+                mensaje += f"Error: {stderr.decode().strip()[:100]}"
     except Exception as e:
-        mensaje = f"Error al verificar equipo: {str(e)}"
+        mensaje = f"Error al ejecutar ping: {str(e)}"
 
     # Verificar si Ollama está respondiendo
     if equipo_online:
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 response = await client.get(f"http://{EQUIPO_IA}:{OLLAMA_PORT}/api/tags")
                 ollama_online = response.status_code == 200
-                mensaje = "Equipo y Ollama funcionando correctamente"
+                if ollama_online:
+                    mensaje = "Equipo y Ollama funcionando correctamente"
+                else:
+                    mensaje = f"Equipo online pero Ollama respondió con código {response.status_code}"
+        except httpx.ConnectError as e:
+            mensaje = f"Equipo online pero no se puede conectar a Ollama: {str(e)}"
+        except httpx.TimeoutException:
+            mensaje = f"Equipo online pero Ollama no responde (timeout)"
         except Exception as e:
-            mensaje = f"Equipo online pero Ollama no responde: {str(e)}"
-    else:
+            mensaje = f"Equipo online pero error al verificar Ollama: {str(e)}"
+    elif not mensaje:
         mensaje = "Equipo apagado o no accesible"
 
     return StatusResponse(
