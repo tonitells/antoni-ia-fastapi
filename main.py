@@ -219,10 +219,21 @@ async def arrancar_equipo():
 async def apagar_equipo():
     """
     Apaga el equipo de IA de manera incondicional via SSH.
+    Primero verifica si el equipo ya está apagado.
     Requiere API Key en header X-API-Key.
     """
     ssh = None
     try:
+        # Verificar si el equipo ya está apagado
+        equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+
+        if not equipo_online:
+            return MessageResponse(
+                success=True,
+                mensaje=f"El equipo ya está apagado. No responde en {EQUIPO_IA}:{SSH_PORT}."
+            )
+
+        # El equipo está encendido, proceder con el apagado
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
