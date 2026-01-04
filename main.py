@@ -1,6 +1,8 @@
 from fastapi import FastAPI, Security, HTTPException, status
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Any
 import os
 from dotenv import load_dotenv
 import httpx
@@ -86,6 +88,44 @@ class ModelsResponse(BaseModel):
     success: bool
     mensaje: str
     models: list[ModelInfo] = []
+
+
+# Modelos para proxy de Ollama
+class OllamaGenerateRequest(BaseModel):
+    model: str
+    prompt: str
+    stream: bool = Field(default=False)
+    options: Optional[Dict[str, Any]] = None
+    system: Optional[str] = None
+    template: Optional[str] = None
+    context: Optional[List[int]] = None
+    raw: Optional[bool] = None
+
+
+class OllamaChatMessage(BaseModel):
+    role: str  # system, user, assistant
+    content: str
+    images: Optional[List[str]] = None
+
+
+class OllamaChatRequest(BaseModel):
+    model: str
+    messages: List[OllamaChatMessage]
+    stream: bool = Field(default=False)
+    options: Optional[Dict[str, Any]] = None
+
+
+class OllamaPullRequest(BaseModel):
+    name: str  # nombre del modelo
+    stream: bool = Field(default=True)
+
+
+class OllamaDeleteRequest(BaseModel):
+    name: str  # nombre del modelo a eliminar
+
+
+class OllamaShowRequest(BaseModel):
+    name: str  # nombre del modelo
 
 
 @app.get("/")
@@ -389,6 +429,300 @@ async def apagar_equipo():
                 ssh.close()
             except:
                 pass
+
+
+# ===== ENDPOINTS DE PROXY A OLLAMA =====
+
+@app.post("/ollama/generate", dependencies=[Security(verify_api_key)])
+async def ollama_generate(request: OllamaGenerateRequest):
+    """
+    Proxy para generar texto con Ollama.
+    Soporta tanto streaming como respuestas completas.
+    Requiere API Key en header X-API-Key.
+    """
+    try:
+        # Verificar que el equipo esté online
+        equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+        if not equipo_online:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"El equipo de IA está apagado o no responde en {EQUIPO_IA}:{SSH_PORT}"
+            )
+
+        url = f"http://{EQUIPO_IA}:{OLLAMA_PORT}/api/generate"
+
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            if request.stream:
+                # Streaming response
+                async def stream_generator():
+                    async with client.stream('POST', url, json=request.model_dump()) as response:
+                        if response.status_code != 200:
+                            error_text = await response.aread()
+                            raise HTTPException(
+                                status_code=response.status_code,
+                                detail=f"Ollama error: {error_text.decode()}"
+                            )
+                        async for chunk in response.aiter_bytes():
+                            yield chunk
+
+                return StreamingResponse(
+                    stream_generator(),
+                    media_type="application/x-ndjson"
+                )
+            else:
+                # Non-streaming response
+                response = await client.post(url, json=request.model_dump())
+                if response.status_code != 200:
+                    raise HTTPException(
+                        status_code=response.status_code,
+                        detail=f"Ollama error: {response.text}"
+                    )
+                return response.json()
+
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"No se puede conectar a Ollama en {EQUIPO_IA}:{OLLAMA_PORT}"
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Timeout al conectar con Ollama"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error en proxy generate: {str(e)}"
+        )
+
+
+@app.post("/ollama/chat", dependencies=[Security(verify_api_key)])
+async def ollama_chat(request: OllamaChatRequest):
+    """
+    Proxy para chat con Ollama.
+    Soporta tanto streaming como respuestas completas.
+    Requiere API Key en header X-API-Key.
+    """
+    try:
+        # Verificar que el equipo esté online
+        equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+        if not equipo_online:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"El equipo de IA está apagado o no responde en {EQUIPO_IA}:{SSH_PORT}"
+            )
+
+        url = f"http://{EQUIPO_IA}:{OLLAMA_PORT}/api/chat"
+
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            if request.stream:
+                # Streaming response
+                async def stream_generator():
+                    async with client.stream('POST', url, json=request.model_dump()) as response:
+                        if response.status_code != 200:
+                            error_text = await response.aread()
+                            raise HTTPException(
+                                status_code=response.status_code,
+                                detail=f"Ollama error: {error_text.decode()}"
+                            )
+                        async for chunk in response.aiter_bytes():
+                            yield chunk
+
+                return StreamingResponse(
+                    stream_generator(),
+                    media_type="application/x-ndjson"
+                )
+            else:
+                # Non-streaming response
+                response = await client.post(url, json=request.model_dump())
+                if response.status_code != 200:
+                    raise HTTPException(
+                        status_code=response.status_code,
+                        detail=f"Ollama error: {response.text}"
+                    )
+                return response.json()
+
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"No se puede conectar a Ollama en {EQUIPO_IA}:{OLLAMA_PORT}"
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Timeout al conectar con Ollama"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error en proxy chat: {str(e)}"
+        )
+
+
+@app.post("/ollama/pull", dependencies=[Security(verify_api_key)])
+async def ollama_pull(request: OllamaPullRequest):
+    """
+    Proxy para descargar modelos en Ollama.
+    Por defecto usa streaming para mostrar progreso.
+    Requiere API Key en header X-API-Key.
+    """
+    try:
+        # Verificar que el equipo esté online
+        equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+        if not equipo_online:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"El equipo de IA está apagado o no responde en {EQUIPO_IA}:{SSH_PORT}"
+            )
+
+        url = f"http://{EQUIPO_IA}:{OLLAMA_PORT}/api/pull"
+
+        async with httpx.AsyncClient(timeout=3600.0) as client:  # 1 hora timeout para pulls grandes
+            if request.stream:
+                # Streaming response para ver progreso
+                async def stream_generator():
+                    async with client.stream('POST', url, json=request.model_dump()) as response:
+                        if response.status_code != 200:
+                            error_text = await response.aread()
+                            raise HTTPException(
+                                status_code=response.status_code,
+                                detail=f"Ollama error: {error_text.decode()}"
+                            )
+                        async for chunk in response.aiter_bytes():
+                            yield chunk
+
+                return StreamingResponse(
+                    stream_generator(),
+                    media_type="application/x-ndjson"
+                )
+            else:
+                # Non-streaming response
+                response = await client.post(url, json=request.model_dump())
+                if response.status_code != 200:
+                    raise HTTPException(
+                        status_code=response.status_code,
+                        detail=f"Ollama error: {response.text}"
+                    )
+                return response.json()
+
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"No se puede conectar a Ollama en {EQUIPO_IA}:{OLLAMA_PORT}"
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Timeout al descargar modelo (puede que sea muy grande)"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error en proxy pull: {str(e)}"
+        )
+
+
+@app.post("/ollama/delete", dependencies=[Security(verify_api_key)])
+async def ollama_delete(request: OllamaDeleteRequest):
+    """
+    Proxy para eliminar modelos de Ollama.
+    Requiere API Key en header X-API-Key.
+    """
+    try:
+        # Verificar que el equipo esté online
+        equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+        if not equipo_online:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"El equipo de IA está apagado o no responde en {EQUIPO_IA}:{SSH_PORT}"
+            )
+
+        url = f"http://{EQUIPO_IA}:{OLLAMA_PORT}/api/delete"
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.delete(url, json=request.model_dump())
+
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Ollama error: {response.text}"
+                )
+
+            return {
+                "success": True,
+                "mensaje": f"Modelo '{request.name}' eliminado correctamente"
+            }
+
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"No se puede conectar a Ollama en {EQUIPO_IA}:{OLLAMA_PORT}"
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Timeout al eliminar modelo"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error en proxy delete: {str(e)}"
+        )
+
+
+@app.post("/ollama/show", dependencies=[Security(verify_api_key)])
+async def ollama_show(request: OllamaShowRequest):
+    """
+    Proxy para obtener información detallada de un modelo en Ollama.
+    Requiere API Key en header X-API-Key.
+    """
+    try:
+        # Verificar que el equipo esté online
+        equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+        if not equipo_online:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"El equipo de IA está apagado o no responde en {EQUIPO_IA}:{SSH_PORT}"
+            )
+
+        url = f"http://{EQUIPO_IA}:{OLLAMA_PORT}/api/show"
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json=request.model_dump())
+
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Ollama error: {response.text}"
+                )
+
+            return response.json()
+
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"No se puede conectar a Ollama en {EQUIPO_IA}:{OLLAMA_PORT}"
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Timeout al obtener información del modelo"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error en proxy show: {str(e)}"
+        )
 
 
 if __name__ == "__main__":
