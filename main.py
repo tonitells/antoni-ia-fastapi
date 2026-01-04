@@ -189,10 +189,20 @@ async def test_ia():
 async def arrancar_equipo():
     """
     Envía un magic packet Wake-on-LAN para arrancar el equipo de IA.
+    Primero verifica si el equipo ya está encendido.
     Requiere API Key en header X-API-Key.
     """
     try:
-        # Enviar magic packet a la dirección de broadcast configurada
+        # Verificar si el equipo ya está encendido
+        equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+
+        if equipo_online:
+            return MessageResponse(
+                success=True,
+                mensaje=f"El equipo ya está encendido y respondiendo en {EQUIPO_IA}:{SSH_PORT}. No es necesario enviar Wake-on-LAN."
+            )
+
+        # El equipo está apagado, enviar magic packet
         send_magic_packet(IA_MAC, ip_address=WOL_BROADCAST, port=WOL_PORT)
         return MessageResponse(
             success=True,
@@ -201,7 +211,7 @@ async def arrancar_equipo():
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al enviar magic packet: {str(e)}"
+            detail=f"Error al intentar arrancar equipo: {str(e)}"
         )
 
 
