@@ -1,0 +1,10 @@
+He montado un equipo en el que está instado un docker con ollama. He instalado wake un lan en el equipo para poder iniciarla remotamente y poder apagarla via ssh. 
+El encendido y apagado remoto ya lo tengo funcionando y lo estoy usando con unos flujos en n8n.
+El inicia y apagado remoto lo he montado con la intención de que no esté siempre encendido el equipo y pueda apagarlo cuando no lo uso. 
+Aqui quiero crear un proyecto con FASTASPI para montar servicios, tanto de encendido y apagado del equipo como de consumo de las IAs con diferentes servicios que iré definiendo.
+Quiero crear los siguientes servicios :
+1.- Test de IA online : servicio que testea si el euipo de IA está en funcionamiento.
+2.- Arrancar el equipo de IA : servicio que envía un magic packet para arrancar la IA.
+3.- Apagar el equipo de IA de manera incondicional : via SHH tiene que hacer un apagado del equipo de la IA.
+
+Las variables para acceder al equipo de IA esntán en .env
