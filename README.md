@@ -183,6 +183,37 @@ curl -H "X-API-Key: tu_api_key" https://ia-api.tudominio.com/test
 }
 ```
 
+#### GET /lista_modelos - Listar modelos instalados en Ollama
+
+```bash
+curl -H "X-API-Key: tu_api_key" https://ia-api.tudominio.com/lista_modelos
+```
+
+**Respuesta:**
+```json
+{
+  "success": true,
+  "mensaje": "Se encontraron 3 modelo(s) instalado(s)",
+  "models": [
+    {
+      "name": "llama2:latest",
+      "size": 3826793677,
+      "modified_at": "2024-01-15T10:30:00Z"
+    },
+    {
+      "name": "codellama:7b",
+      "size": 3791737293,
+      "modified_at": "2024-01-14T15:20:00Z"
+    },
+    {
+      "name": "mistral:latest",
+      "size": 4109865159,
+      "modified_at": "2024-01-13T09:15:00Z"
+    }
+  ]
+}
+```
+
 #### POST /arrancar - Arrancar el equipo de IA
 
 ```bash

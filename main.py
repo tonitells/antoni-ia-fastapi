@@ -76,6 +76,18 @@ class MessageResponse(BaseModel):
     mensaje: str
 
 
+class ModelInfo(BaseModel):
+    name: str
+    size: int = None
+    modified_at: str = None
+
+
+class ModelsResponse(BaseModel):
+    success: bool
+    mensaje: str
+    models: list[ModelInfo] = []
+
+
 @app.get("/")
 async def root():
     return {
@@ -183,6 +195,71 @@ async def test_ia():
         ollama_online=ollama_online,
         mensaje=mensaje
     )
+
+
+@app.get("/lista_modelos", response_model=ModelsResponse, dependencies=[Security(verify_api_key)])
+async def lista_modelos():
+    """
+    Lista todos los modelos instalados en Ollama.
+    Requiere API Key en header X-API-Key.
+    """
+    try:
+        # Verificar si el equipo está encendido
+        equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+
+        if not equipo_online:
+            return ModelsResponse(
+                success=False,
+                mensaje=f"El equipo está apagado o no responde en {EQUIPO_IA}:{SSH_PORT}",
+                models=[]
+            )
+
+        # Obtener lista de modelos desde Ollama
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"http://{EQUIPO_IA}:{OLLAMA_PORT}/api/tags")
+
+            if response.status_code != 200:
+                return ModelsResponse(
+                    success=False,
+                    mensaje=f"Ollama respondió con código {response.status_code}",
+                    models=[]
+                )
+
+            data = response.json()
+            models = []
+
+            # Parsear la respuesta de Ollama
+            if "models" in data:
+                for model in data["models"]:
+                    models.append(ModelInfo(
+                        name=model.get("name", ""),
+                        size=model.get("size"),
+                        modified_at=model.get("modified_at")
+                    ))
+
+            return ModelsResponse(
+                success=True,
+                mensaje=f"Se encontraron {len(models)} modelo(s) instalado(s)",
+                models=models
+            )
+
+    except httpx.ConnectError:
+        return ModelsResponse(
+            success=False,
+            mensaje=f"No se puede conectar a Ollama en {EQUIPO_IA}:{OLLAMA_PORT}",
+            models=[]
+        )
+    except httpx.TimeoutException:
+        return ModelsResponse(
+            success=False,
+            mensaje="Timeout al conectar con Ollama",
+            models=[]
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al obtener lista de modelos: {str(e)}"
+        )
 
 
 @app.post("/arrancar", response_model=MessageResponse, dependencies=[Security(verify_api_key)])
