@@ -206,6 +206,7 @@ async def apagar_equipo():
     Apaga el equipo de IA de manera incondicional via SSH.
     Requiere API Key en header X-API-Key.
     """
+    ssh = None
     try:
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -218,19 +219,76 @@ async def apagar_equipo():
             timeout=5
         )
 
-        stdin, stdout, stderr = ssh.exec_command("sudo shutdown -h now")
+        # Intentar con sudo primero
+        stdin, stdout, stderr = ssh.exec_command("sudo shutdown -h now", get_pty=True)
+
+        # Si se requiere contraseña para sudo, enviarla
+        if SSH_PASS:
+            stdin.write(SSH_PASS + '\n')
+            stdin.flush()
+
+        # Esperar un momento para que el comando se procese
+        exit_status = stdout.channel.recv_exit_status()
+        error_output = stderr.read().decode('utf-8', errors='ignore').strip()
+        std_output = stdout.read().decode('utf-8', errors='ignore').strip()
 
         ssh.close()
+
+        # Si el comando con sudo falló, informar
+        if exit_status != 0:
+            # Intentar sin sudo como respaldo
+            try:
+                ssh = paramiko.SSHClient()
+                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                ssh.connect(
+                    hostname=EQUIPO_IA,
+                    port=SSH_PORT,
+                    username=SSH_USER,
+                    password=SSH_PASS,
+                    timeout=5
+                )
+
+                stdin, stdout, stderr = ssh.exec_command("shutdown -h now")
+                exit_status2 = stdout.channel.recv_exit_status()
+
+                ssh.close()
+
+                if exit_status2 != 0:
+                    error_msg = f"Error al ejecutar shutdown. Salida: {std_output}. Error: {error_output}"
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=error_msg
+                    )
+            except HTTPException:
+                raise
+            except Exception as e2:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Sudo falló y shutdown sin sudo también: {error_output}. {str(e2)}"
+                )
 
         return MessageResponse(
             success=True,
             mensaje="Comando de apagado enviado correctamente. El equipo se apagará en breve."
+        )
+    except HTTPException:
+        raise
+    except paramiko.AuthenticationException:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Error de autenticación SSH. Verifica SSH_USER y SSH_PASS"
         )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al apagar equipo via SSH: {str(e)}"
         )
+    finally:
+        if ssh:
+            try:
+                ssh.close()
+            except:
+                pass
 
 
 if __name__ == "__main__":
