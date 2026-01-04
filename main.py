@@ -245,13 +245,10 @@ async def apagar_equipo():
             timeout=5
         )
 
-        # Intentar con sudo primero
-        stdin, stdout, stderr = ssh.exec_command("sudo shutdown -h now", get_pty=True)
-
-        # Si se requiere contraseña para sudo, enviarla
-        if SSH_SUDO_PASS:
-            stdin.write(SSH_SUDO_PASS + '\n')
-            stdin.flush()
+        # Ejecutar shutdown con sudo usando la contraseña desde SSH_SUDO_PASS
+        # Usa sudo -S para leer la contraseña desde stdin
+        shutdown_command = f'echo "{SSH_SUDO_PASS}" | sudo -S shutdown -h now'
+        stdin, stdout, stderr = ssh.exec_command(shutdown_command)
 
         # Esperar un momento para que el comando se procese
         exit_status = stdout.channel.recv_exit_status()
