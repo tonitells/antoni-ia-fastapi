@@ -70,7 +70,25 @@ SUBDOMINIO=ia-api.tudominio.com
 - `SSH_SUDO_PASS`: Contraseña de sudo (puede ser diferente a la de SSH). Si no se especifica, usa la misma que `SSH_PASS`
 - Si el apagado falla, verifica que el usuario tenga permisos sudo o configura sudo sin contraseña (ver sección de solución de problemas)
 
-### 3. Construir y ejecutar con Docker Compose
+### 3. Despliegue rápido (recomendado)
+
+El script `desplegar_docker.sh` automatiza todo el proceso de actualización y despliegue:
+
+```bash
+# Ejecutar el script de despliegue
+./desplegar_docker.sh
+```
+
+El script realiza automáticamente:
+1. ✅ Actualiza el repositorio con `git pull`
+2. ✅ Verifica que las redes `proxy` y `macvlan_local` existan
+3. ✅ Detiene el contenedor anterior si existe
+4. ✅ Construye y levanta el contenedor con Traefik
+5. ✅ Muestra el estado final
+
+**Nota**: Antes de usar el script por primera vez, asegúrate de haber creado la red macvlan (ver sección siguiente).
+
+### 4. Construir y ejecutar con Docker Compose (manual)
 
 #### Opción A: Con Traefik + Wake-on-LAN (configuración recomendada)
 
@@ -119,7 +137,7 @@ docker-compose logs -f
 - **No es compatible con Traefik** (no puede rutear contenedores en modo host)
 - Usa esta opción si no necesitas HTTPS/dominio personalizado
 
-### 4. Verificar que está funcionando
+### 5. Verificar que está funcionando
 
 ```bash
 curl https://ia-api.tudominio.com/
