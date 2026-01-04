@@ -43,6 +43,11 @@ IA_MAC=18:c0:4d:3b:fc:8f
 OLLAMA_PORT=11434
 OPEN_WEBUI_PORT=3000
 
+# Wake-on-LAN Configuration
+# Dirección de broadcast de tu red local (192.168.1.255 para red 192.168.1.x)
+WOL_BROADCAST=192.168.1.255
+WOL_PORT=9
+
 # Configuración SSH
 SSH_USER=tu_usuario
 SSH_PASS=tu_contraseña
@@ -54,6 +59,11 @@ API_KEYS=tu_api_key_secreta_aqui,otra_api_key_opcional
 # Configuración de Traefik
 SUBDOMINIO=ia-api.tudominio.com
 ```
+
+**IMPORTANTE para Wake-on-LAN:**
+- `WOL_BROADCAST`: Dirección de broadcast de tu red. Para una red `192.168.1.x`, usa `192.168.1.255`
+- Si ejecutas desde Docker, el `docker-compose.yml` está configurado con `network_mode: host` para que WOL funcione correctamente
+- Si necesitas usar Traefik, consulta la sección "Configuración de red para Wake-on-LAN" más abajo
 
 ### 3. Construir y ejecutar con Docker Compose
 
@@ -170,9 +180,28 @@ Una vez en funcionamiento, puedes acceder a la documentación interactiva:
 - **Swagger UI**: `https://ia-api.tudominio.com/docs`
 - **ReDoc**: `https://ia-api.tudominio.com/redoc`
 
+## Configuración de red para Wake-on-LAN
+
+Por defecto, el `docker-compose.yml` usa `network_mode: host` para que Wake-on-LAN funcione correctamente. Esto permite que el contenedor acceda directamente a la red del host y envíe paquetes de broadcast.
+
+### Opción 1: Red Host (Recomendado para WOL)
+```yaml
+network_mode: host
+```
+- Wake-on-LAN funciona perfectamente
+- La API estará disponible directamente en el puerto 8000 del host
+- **No compatible con Traefik** (no puede rutear tráfico a contenedores en modo host)
+
+### Opción 2: Red Bridge con Traefik
+Si necesitas usar Traefik, edita el `docker-compose.yml`:
+1. Comenta la línea `network_mode: host`
+2. Descomenta las secciones de `networks` y `labels`
+3. **Nota**: WOL puede no funcionar correctamente desde Docker en modo bridge
+4. Alternativa: ejecuta la API directamente en el host sin Docker para usar Traefik en otro servicio
+
 ## Configuración de Traefik
 
-El proyecto está configurado para usar Traefik con:
+Si usas la Opción 2 (red bridge), el proyecto está configurado para usar Traefik con:
 - Red externa `traefik`
 - HTTPS automático con Let's Encrypt
 - Certificado SSL automático
@@ -204,8 +233,12 @@ La API estará disponible en `http://localhost:8000`
 
 ### El equipo no arranca con Wake-on-LAN
 - Verifica que Wake-on-LAN esté habilitado en la BIOS
-- Asegúrate de que la MAC address sea correcta
-- Verifica que el equipo esté en la misma red o accesible
+- Asegúrate de que la MAC address sea correcta en el `.env`
+- Verifica la dirección de broadcast en `WOL_BROADCAST` (debe ser `.255` para tu red)
+- Si usas Docker con `network_mode: host`, asegúrate de reconstruir el contenedor: `docker-compose up -d --build`
+- Si usas red bridge, prueba ejecutar la API localmente sin Docker
+- Verifica en el router/firewall que los paquetes UDP al puerto 9 no estén bloqueados
+- Actualiza tu archivo `.env` con las nuevas variables `WOL_BROADCAST` y `WOL_PORT`
 
 ### Error al apagar via SSH
 - Verifica credenciales SSH

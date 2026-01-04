@@ -26,6 +26,9 @@ SSH_USER = os.getenv("SSH_USER")
 SSH_PASS = os.getenv("SSH_PASS")
 SSH_PORT = int(os.getenv("SSH_PORT", "22"))
 API_KEYS = os.getenv("API_KEYS", "").split(",")
+# Dirección de broadcast para Wake-on-LAN (por defecto usa la de la red del equipo)
+WOL_BROADCAST = os.getenv("WOL_BROADCAST", "255.255.255.255")
+WOL_PORT = int(os.getenv("WOL_PORT", "9"))
 
 
 async def verify_api_key(api_key: str = Security(API_KEY_HEADER)):
@@ -113,10 +116,11 @@ async def arrancar_equipo():
     Requiere API Key en header X-API-Key.
     """
     try:
-        send_magic_packet(IA_MAC)
+        # Enviar magic packet a la dirección de broadcast configurada
+        send_magic_packet(IA_MAC, ip_address=WOL_BROADCAST, port=WOL_PORT)
         return MessageResponse(
             success=True,
-            mensaje=f"Magic packet enviado a {IA_MAC}. El equipo debería arrancar en breve."
+            mensaje=f"Magic packet enviado a {IA_MAC} via {WOL_BROADCAST}:{WOL_PORT}. El equipo debería arrancar en breve."
         )
     except Exception as e:
         raise HTTPException(
