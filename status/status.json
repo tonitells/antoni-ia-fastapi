@@ -1,0 +1,8 @@
+{
+    "logical_on": false,
+    "phisical_on": false,
+    "peticions_ollama": 0,
+    "permanent_on": false,
+    "message": "Shutdown forzado: Apagado físico enviado, estado completamente reseteado",
+    "datetime": "2026-01-07T15:59:40.367998Z"
+}

@@ -10,8 +10,15 @@ import asyncio
 from wakeonlan import send_magic_packet
 import paramiko
 import socket
+import json
+from datetime import datetime
+from pathlib import Path
 
 load_dotenv()
+
+# Ruta al archivo de estado
+STATUS_FILE = Path("status/status.json")
+BASE_STATUS_FILE = Path("status/base.json")
 
 app = FastAPI(
     title="Antoni IA API",
@@ -33,6 +40,75 @@ API_KEYS = os.getenv("API_KEYS", "").split(",")
 # Dirección de broadcast para Wake-on-LAN (por defecto usa la de la red del equipo)
 WOL_BROADCAST = os.getenv("WOL_BROADCAST", "255.255.255.255")
 WOL_PORT = int(os.getenv("WOL_PORT", "9"))
+
+
+# ===== FUNCIONES DE GESTIÓN DE ESTADO =====
+
+def read_status() -> dict:
+    """Lee el estado actual desde status.json"""
+    try:
+        if STATUS_FILE.exists():
+            with open(STATUS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        else:
+            # Si no existe, crear desde base.json
+            if BASE_STATUS_FILE.exists():
+                with open(BASE_STATUS_FILE, 'r', encoding='utf-8') as f:
+                    base_status = json.load(f)
+                write_status(base_status)
+                return base_status
+            else:
+                # Si tampoco existe base.json, crear estado por defecto
+                default_status = {
+                    "logical_on": False,
+                    "phisical_on": False,
+                    "peticions_ollama": 0,
+                    "permanent_on": False,
+                    "message": "Equip offline",
+                    "datetime": datetime.utcnow().isoformat() + "Z"
+                }
+                write_status(default_status)
+                return default_status
+    except Exception as e:
+        # En caso de error, retornar estado por defecto
+        return {
+            "logical_on": False,
+            "phisical_on": False,
+            "peticions_ollama": 0,
+            "permanent_on": False,
+            "message": f"Error reading status: {str(e)}",
+            "datetime": datetime.utcnow().isoformat() + "Z"
+        }
+
+
+def write_status(status_data: dict):
+    """Escribe el estado en status.json"""
+    try:
+        # Asegurar que el directorio existe
+        STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+        # Actualizar el timestamp
+        status_data["datetime"] = datetime.utcnow().isoformat() + "Z"
+
+        with open(STATUS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(status_data, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        print(f"Error writing status file: {e}")
+
+
+def update_status(updates: dict, message: str):
+    """
+    Actualiza campos específicos del estado y añade un mensaje.
+
+    Args:
+        updates: Diccionario con los campos a actualizar
+        message: Mensaje descriptivo de la operación
+    """
+    status = read_status()
+    status.update(updates)
+    status["message"] = message
+    write_status(status)
+    return status
 
 
 async def verify_api_key(api_key: str = Security(API_KEY_HEADER)):
@@ -195,6 +271,7 @@ async def debug_info():
 async def test_ia():
     """
     Verifica el estado del equipo de IA y si Ollama está respondiendo.
+    Actualiza logical_on y phisical_on en el archivo de estado.
     Requiere API Key en header X-API-Key.
     """
     equipo_online = False
@@ -222,13 +299,22 @@ async def test_ia():
                 else:
                     mensaje = f"Equipo online pero Ollama respondió con código {response.status_code}"
         except httpx.ConnectError as e:
-            mensaje = f"Equipo online pero no se puede conectar a Ollama en puerto {OLLAMA_PORT}"
+            mensaje = f"Equipo online pero no se puede conectar a Ollama en puerto {OLLAMA_PORT} : {str(e)}"
         except httpx.TimeoutException:
-            mensaje = f"Equipo online pero Ollama no responde (timeout)"
+            mensaje = "Equipo online pero Ollama no responde (timeout)"
         except Exception as e:
             mensaje = f"Equipo online pero error al verificar Ollama: {str(e)}"
     elif not mensaje:
         mensaje = "Equipo apagado o no accesible"
+
+    # Actualizar el estado en el archivo status.json
+    update_status(
+        updates={
+            "logical_on": ollama_online,
+            "phisical_on": equipo_online
+        },
+        message=f"Test: {mensaje}"
+    )
 
     return StatusResponse(
         equipo_online=equipo_online,
@@ -306,24 +392,49 @@ async def lista_modelos():
 async def arrancar_equipo():
     """
     Envía un magic packet Wake-on-LAN para arrancar el equipo de IA.
+    Incrementa el contador peticions_ollama.
     Primero verifica si el equipo ya está encendido.
     Requiere API Key en header X-API-Key.
     """
     try:
+        # Leer el estado actual
+        current_status = read_status()
+
         # Verificar si el equipo ya está encendido
         equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
 
+        # Incrementar contador de peticiones
+        new_peticions = current_status.get("peticions_ollama", 0) + 1
+
         if equipo_online:
+            # Actualizar estado: equipo ya online, incrementar contador
+            update_status(
+                updates={
+                    "peticions_ollama": new_peticions,
+                    "phisical_on": True
+                },
+                message=f"Arrancar: Equipo ya encendido. Peticions: {new_peticions}"
+            )
+
             return MessageResponse(
                 success=True,
-                mensaje=f"El equipo ya está encendido y respondiendo en {EQUIPO_IA}:{SSH_PORT}. No es necesario enviar Wake-on-LAN."
+                mensaje=f"El equipo ya está encendido y respondiendo en {EQUIPO_IA}:{SSH_PORT}. Peticiones Ollama: {new_peticions}"
             )
 
         # El equipo está apagado, enviar magic packet
         send_magic_packet(IA_MAC, ip_address=WOL_BROADCAST, port=WOL_PORT)
+
+        # Actualizar estado: WOL enviado, incrementar contador
+        update_status(
+            updates={
+                "peticions_ollama": new_peticions
+            },
+            message=f"Arrancar: Magic packet enviado. Peticions: {new_peticions}"
+        )
+
         return MessageResponse(
             success=True,
-            mensaje=f"Magic packet enviado a {IA_MAC} via {WOL_BROADCAST}:{WOL_PORT}. El equipo debería arrancar en breve."
+            mensaje=f"Magic packet enviado a {IA_MAC} via {WOL_BROADCAST}:{WOL_PORT}. Peticiones Ollama: {new_peticions}"
         )
     except Exception as e:
         raise HTTPException(
@@ -335,22 +446,61 @@ async def arrancar_equipo():
 @app.post("/apagar", response_model=MessageResponse, dependencies=[Security(verify_api_key)])
 async def apagar_equipo():
     """
-    Apaga el equipo de IA de manera incondicional via SSH.
-    Primero verifica si el equipo ya está apagado.
+    Gestiona el apagado del equipo con sistema de contador de peticiones.
+    - Decrementa el contador peticions_ollama
+    - Solo apaga físicamente si peticions_ollama < 1
+    - Respeta permanent_on: si está en true, no apaga físicamente aunque peticions_ollama < 1
+    - Actualiza logical_on y phisical_on a false solo si se envía señal de apagado físico
     Requiere API Key en header X-API-Key.
     """
     ssh = None
     try:
+        # Leer el estado actual
+        current_status = read_status()
+
         # Verificar si el equipo ya está apagado
         equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
 
         if not equipo_online:
-            return MessageResponse(
-                success=True,
-                mensaje=f"El equipo ya está apagado. No responde en {EQUIPO_IA}:{SSH_PORT}."
+            # Equipo ya apagado, decrementar contador (mínimo 0)
+            new_peticions = max(0, current_status.get("peticions_ollama", 0) - 1)
+            update_status(
+                updates={
+                    "peticions_ollama": new_peticions,
+                    "phisical_on": False,
+                    "logical_on": False
+                },
+                message=f"Apagar: Equipo ya apagado. Peticions: {new_peticions}"
             )
 
-        # El equipo está encendido, proceder con el apagado
+            return MessageResponse(
+                success=True,
+                mensaje=f"El equipo ya está apagado. Peticiones Ollama: {new_peticions}"
+            )
+
+        # Decrementar contador de peticiones (mínimo 0)
+        new_peticions = max(0, current_status.get("peticions_ollama", 0) - 1)
+        permanent_on = current_status.get("permanent_on", False)
+
+        # Determinar si se debe apagar físicamente
+        should_shutdown_physically = (new_peticions < 1) and (not permanent_on)
+
+        if not should_shutdown_physically:
+            # No apagar físicamente, solo actualizar contador
+            reason = "permanent_on activado" if permanent_on else f"hay {new_peticions} petición(es) activa(s)"
+            update_status(
+                updates={
+                    "peticions_ollama": new_peticions
+                },
+                message=f"Apagar: No se apaga físicamente ({reason}). Peticions: {new_peticions}"
+            )
+
+            return MessageResponse(
+                success=True,
+                mensaje=f"Contador decrementado a {new_peticions}. No se apaga físicamente: {reason}"
+            )
+
+        # Apagar físicamente el equipo
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
@@ -374,9 +524,8 @@ async def apagar_equipo():
 
         ssh.close()
 
-        # Si el comando con sudo falló, informar
+        # Si el comando con sudo falló, intentar sin sudo como respaldo
         if exit_status != 0:
-            # Intentar sin sudo como respaldo
             try:
                 ssh = paramiko.SSHClient()
                 ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -407,10 +556,21 @@ async def apagar_equipo():
                     detail=f"Sudo falló y shutdown sin sudo también: {error_output}. {str(e2)}"
                 )
 
+        # Actualizar estado: apagado físico enviado
+        update_status(
+            updates={
+                "peticions_ollama": new_peticions,
+                "logical_on": False,
+                "phisical_on": False
+            },
+            message=f"Apagar: Apagado físico enviado. Peticions: {new_peticions}"
+        )
+
         return MessageResponse(
             success=True,
-            mensaje="Comando de apagado enviado correctamente. El equipo se apagará en breve."
+            mensaje=f"Apagado físico enviado. Peticiones: {new_peticions}. El equipo se apagará en breve."
         )
+
     except HTTPException:
         raise
     except paramiko.AuthenticationException:
@@ -422,6 +582,260 @@ async def apagar_equipo():
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al apagar equipo via SSH: {str(e)}"
+        )
+    finally:
+        if ssh:
+            try:
+                ssh.close()
+            except:
+                pass
+
+
+@app.post("/permanent_on_enable", response_model=MessageResponse, dependencies=[Security(verify_api_key)])
+async def permanent_on_enable():
+    """
+    Activa el modo permanent_on.
+    Cuando está activado, el equipo NO se apagará físicamente aunque peticions_ollama sea < 1.
+    Requiere API Key en header X-API-Key.
+    """
+    try:
+        update_status(
+            updates={"permanent_on": True},
+            message="Permanent_on activado: el equipo no se apagará automáticamente"
+        )
+
+        return MessageResponse(
+            success=True,
+            mensaje="Modo permanent_on activado. El equipo no se apagará automáticamente."
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al activar permanent_on: {str(e)}"
+        )
+
+
+@app.post("/permanent_on_disable", response_model=MessageResponse, dependencies=[Security(verify_api_key)])
+async def permanent_on_disable():
+    """
+    Desactiva el modo permanent_on.
+    El equipo podrá apagarse automáticamente cuando peticions_ollama sea < 1.
+    Requiere API Key en header X-API-Key.
+    """
+    try:
+        update_status(
+            updates={"permanent_on": False},
+            message="Permanent_on desactivado: el equipo podrá apagarse automáticamente"
+        )
+
+        return MessageResponse(
+            success=True,
+            mensaje="Modo permanent_on desactivado. El equipo podrá apagarse automáticamente."
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al desactivar permanent_on: {str(e)}"
+        )
+
+
+@app.get("/status", dependencies=[Security(verify_api_key)])
+async def get_status():
+    """
+    Obtiene el estado actual del sistema desde status.json.
+    Muestra logical_on, phisical_on, peticions_ollama, permanent_on, message y datetime.
+    Requiere API Key en header X-API-Key.
+    """
+    try:
+        current_status = read_status()
+        return current_status
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al leer estado: {str(e)}"
+        )
+
+
+@app.post("/init", dependencies=[Security(verify_api_key)])
+async def init_status():
+    """
+    Inicializa el estado del sistema verificando el estado real del equipo.
+    - Verifica si el equipo está encendido (phisical_on)
+    - Verifica si Ollama está respondiendo (logical_on)
+    - Resetea peticions_ollama a 0
+    - Resetea permanent_on a false
+    Útil para sincronizar el estado después de un reinicio del servidor o cambios manuales.
+    Requiere API Key en header X-API-Key.
+    """
+    try:
+        equipo_online = False
+        ollama_online = False
+        mensaje = ""
+
+        # Verificar si el equipo está encendido (conexión TCP al puerto SSH)
+        try:
+            equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+
+            if not equipo_online:
+                mensaje = f"Equipo no accesible en {EQUIPO_IA}:{SSH_PORT}"
+        except Exception as e:
+            mensaje = f"Error al verificar conectividad: {str(e)}"
+            equipo_online = False
+
+        # Verificar si Ollama está respondiendo
+        if equipo_online:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.get(f"http://{EQUIPO_IA}:{OLLAMA_PORT}/api/tags")
+                    ollama_online = response.status_code == 200
+                    if ollama_online:
+                        mensaje = "Init: Equipo y Ollama funcionando correctamente"
+                    else:
+                        mensaje = f"Init: Equipo online pero Ollama respondió con código {response.status_code}"
+            except httpx.ConnectError:
+                mensaje = f"Init: Equipo online pero no se puede conectar a Ollama en puerto {OLLAMA_PORT}"
+            except httpx.TimeoutException:
+                mensaje = "Init: Equipo online pero Ollama no responde (timeout)"
+            except Exception as e:
+                mensaje = f"Init: Equipo online pero error al verificar Ollama: {str(e)}"
+        else:
+            mensaje = "Init: Equipo apagado o no accesible"
+
+        # Inicializar el estado con valores reseteados
+        new_status = update_status(
+            updates={
+                "logical_on": ollama_online,
+                "phisical_on": equipo_online,
+                "peticions_ollama": 0,
+                "permanent_on": False
+            },
+            message=mensaje
+        )
+
+        return {
+            "success": True,
+            "mensaje": f"Estado inicializado. {mensaje}",
+            "status": new_status
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al inicializar estado: {str(e)}"
+        )
+
+
+@app.post("/shutdown", response_model=MessageResponse, dependencies=[Security(verify_api_key)])
+async def shutdown_force():
+    """
+    Apagado forzado del equipo.
+    Resetea el estado completo: permanent_on=false, logical_on=false, phisical_on=false, peticions_ollama=0
+    y envía comando de apagado físico via SSH.
+    Requiere API Key en header X-API-Key.
+    """
+    ssh = None
+    try:
+        # Verificar si el equipo está online
+        equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+
+        if not equipo_online:
+            # Equipo ya apagado, solo resetear estado
+            update_status(
+                updates={
+                    "permanent_on": False,
+                    "logical_on": False,
+                    "phisical_on": False,
+                    "peticions_ollama": 0
+                },
+                message="Shutdown forzado: Equipo ya estaba apagado, estado reseteado"
+            )
+
+            return MessageResponse(
+                success=True,
+                mensaje="El equipo ya está apagado. Estado reseteado completamente."
+            )
+
+        # Equipo está encendido, proceder con apagado forzado
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+        ssh.connect(
+            hostname=EQUIPO_IA,
+            port=SSH_PORT,
+            username=SSH_USER,
+            password=SSH_PASS,
+            timeout=5
+        )
+
+        # Ejecutar shutdown con sudo
+        shutdown_command = f'echo "{SSH_SUDO_PASS}" | sudo -S shutdown -h now'
+        stdin, stdout, stderr = ssh.exec_command(shutdown_command)
+
+        exit_status = stdout.channel.recv_exit_status()
+        error_output = stderr.read().decode('utf-8', errors='ignore').strip()
+        std_output = stdout.read().decode('utf-8', errors='ignore').strip()
+
+        ssh.close()
+
+        # Si el comando con sudo falló, intentar sin sudo
+        if exit_status != 0:
+            try:
+                ssh = paramiko.SSHClient()
+                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                ssh.connect(
+                    hostname=EQUIPO_IA,
+                    port=SSH_PORT,
+                    username=SSH_USER,
+                    password=SSH_PASS,
+                    timeout=5
+                )
+
+                stdin, stdout, stderr = ssh.exec_command("shutdown -h now")
+                exit_status2 = stdout.channel.recv_exit_status()
+
+                ssh.close()
+
+                if exit_status2 != 0:
+                    error_msg = f"Error al ejecutar shutdown. Salida: {std_output}. Error: {error_output}"
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=error_msg
+                    )
+            except HTTPException:
+                raise
+            except Exception as e2:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Sudo falló y shutdown sin sudo también: {error_output}. {str(e2)}"
+                )
+
+        # Actualizar estado: todo reseteado
+        update_status(
+            updates={
+                "permanent_on": False,
+                "logical_on": False,
+                "phisical_on": False,
+                "peticions_ollama": 0
+            },
+            message="Shutdown forzado: Apagado físico enviado, estado completamente reseteado"
+        )
+
+        return MessageResponse(
+            success=True,
+            mensaje="Apagado forzado enviado. Estado completamente reseteado. El equipo se apagará en breve."
+        )
+
+    except HTTPException:
+        raise
+    except paramiko.AuthenticationException:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Error de autenticación SSH. Verifica SSH_USER y SSH_PASS"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al ejecutar shutdown forzado: {str(e)}"
         )
     finally:
         if ssh:
