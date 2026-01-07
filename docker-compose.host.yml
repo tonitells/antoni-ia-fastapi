@@ -1,8 +1,0 @@
-version: "3.8"
-
-services:
-  antoni-ia-api:
-    # Modo host: necesario para que Wake-on-LAN funcione correctamente
-    # Permite al contenedor acceder directamente a la red del host
-    # En este modo, el contenedor usa directamente el puerto 8000 del host
-    network_mode: host
