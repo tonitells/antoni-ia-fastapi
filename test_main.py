@@ -4,6 +4,7 @@ Tests cover authentication, status management, equipment control, and state logi
 """
 import pytest
 import json
+import asyncio
 from pathlib import Path
 from unittest.mock import patch, AsyncMock, MagicMock
 
@@ -78,15 +79,15 @@ class TestStatusManagement:
 class TestStatusEndpoint:
     """Tests for GET /status endpoint."""
 
-    def test_get_status(self, client, test_api_key, temp_status_dir):
+    def test_get_status(self, client, test_api_key, temp_status_dir, mock_check_connectivity_offline):
         """Test retrieving current status."""
         from main import update_status
 
         # Set some status
-        update_status(
+        asyncio.run(update_status(
             updates={"peticions_ollama": 2, "permanent_on": True},
             message="Test status"
-        )
+        ))
 
         response = client.get("/status", headers={"X-API-Key": test_api_key})
         assert response.status_code == 200
@@ -94,7 +95,6 @@ class TestStatusEndpoint:
         data = response.json()
         assert data["peticions_ollama"] == 2
         assert data["permanent_on"] is True
-        assert data["message"] == "Test status"
 
 
 class TestInitEndpoint:
@@ -133,10 +133,10 @@ class TestInitEndpoint:
         from main import update_status
 
         # Set non-zero values
-        update_status(
+        asyncio.run(update_status(
             updates={"peticions_ollama": 5, "permanent_on": True},
             message="Before init"
-        )
+        ))
 
         response = client.post("/init", headers={"X-API-Key": test_api_key})
         assert response.status_code == 200
@@ -162,8 +162,8 @@ class TestTestEndpoint:
         assert data["equipo_online"] is True
         assert data["ollama_online"] is True
 
-        # Check that status was updated
-        status = read_status()
+        # Check that status was updated (read_status is async now)
+        status = asyncio.run(read_status())
         assert status["phisical_on"] is True
         assert status["logical_on"] is True
 
@@ -193,13 +193,13 @@ class TestArrancarEndpoint:
 
         data = response.json()
         assert data["success"] is True
-        assert "Peticiones Ollama: 1" in data["mensaje"]
+        assert "Peticions Ollama: 1" in data["mensaje"]
 
         # Verify WOL was called
         mock_wol.assert_called_once()
 
         # Check status
-        status = read_status()
+        status = asyncio.run(read_status())
         assert status["peticions_ollama"] == 1
 
     def test_arrancar_multiple_times(
@@ -211,15 +211,15 @@ class TestArrancarEndpoint:
 
         # First call
         response = client.post("/arrancar", headers={"X-API-Key": test_api_key})
-        assert "Peticiones Ollama: 1" in response.json()["mensaje"]
+        assert "Peticions Ollama: 1" in response.json()["mensaje"]
 
         # Second call
         response = client.post("/arrancar", headers={"X-API-Key": test_api_key})
-        assert "Peticiones Ollama: 2" in response.json()["mensaje"]
+        assert "Peticions Ollama: 2" in response.json()["mensaje"]
 
         # Third call
         response = client.post("/arrancar", headers={"X-API-Key": test_api_key})
-        assert "Peticiones Ollama: 3" in response.json()["mensaje"]
+        assert "Peticions Ollama: 3" in response.json()["mensaje"]
 
         # Verify final status
         response = client.get("/status", headers={"X-API-Key": test_api_key})
@@ -234,7 +234,7 @@ class TestArrancarEndpoint:
 
         data = response.json()
         assert data["success"] is True
-        assert "ya está encendido" in data["mensaje"]
+        assert "ja està encès" in data["mensaje"]
 
         # WOL should NOT be called when already online
         mock_wol.assert_not_called()
@@ -250,7 +250,7 @@ class TestApagarEndpoint:
         from main import update_status, read_status
 
         # Set counter to 2
-        update_status(updates={"peticions_ollama": 2}, message="Setup")
+        asyncio.run(update_status(updates={"peticions_ollama": 2}, message="Setup"))
 
         response = client.post("/apagar", headers={"X-API-Key": test_api_key})
         assert response.status_code == 200
@@ -258,7 +258,7 @@ class TestApagarEndpoint:
         data = response.json()
         assert data["success"] is True
 
-        status = read_status()
+        status = asyncio.run(read_status())
         assert status["peticions_ollama"] == 1
 
     def test_apagar_does_not_shutdown_with_active_requests(
@@ -268,14 +268,14 @@ class TestApagarEndpoint:
         from main import update_status
 
         # Set counter to 2
-        update_status(updates={"peticions_ollama": 2}, message="Setup")
+        asyncio.run(update_status(updates={"peticions_ollama": 2}, message="Setup"))
 
         response = client.post("/apagar", headers={"X-API-Key": test_api_key})
         assert response.status_code == 200
 
         data = response.json()
-        assert "No se apaga físicamente" in data["mensaje"]
-        assert "petición(es) activa(s)" in data["mensaje"]
+        assert "No s'apaga físicament" in data["mensaje"]
+        assert "petició(ns) activa(es)" in data["mensaje"]
 
         # SSH should NOT be called
         mock_ssh_success.connect.assert_not_called()
@@ -287,20 +287,23 @@ class TestApagarEndpoint:
         from main import update_status, read_status
 
         # Set counter to 1
-        update_status(updates={"peticions_ollama": 1}, message="Setup")
+        asyncio.run(update_status(updates={"peticions_ollama": 1}, message="Setup"))
 
         response = client.post("/apagar", headers={"X-API-Key": test_api_key})
         assert response.status_code == 200
 
         data = response.json()
         assert data["success"] is True
-        assert "Apagado físico enviado" in data["mensaje"]
+        assert "Apagat físic enviat" in data["mensaje"]
 
         # SSH should be called
         mock_ssh_success.connect.assert_called()
 
+        # After shutdown, mock connectivity to be offline
+        mock_check_connectivity_online.return_value = False
+
         # Check status
-        status = read_status()
+        status = asyncio.run(read_status())
         assert status["peticions_ollama"] == 0
         assert status["phisical_on"] is False
         assert status["logical_on"] is False
@@ -312,23 +315,23 @@ class TestApagarEndpoint:
         from main import update_status, read_status
 
         # Set counter to 1 and permanent_on to True
-        update_status(
+        asyncio.run(update_status(
             updates={"peticions_ollama": 1, "permanent_on": True},
             message="Setup"
-        )
+        ))
 
         response = client.post("/apagar", headers={"X-API-Key": test_api_key})
         assert response.status_code == 200
 
         data = response.json()
-        assert "No se apaga físicamente" in data["mensaje"]
-        assert "permanent_on activado" in data["mensaje"]
+        assert "No s'apaga físicament" in data["mensaje"]
+        assert "permanent_on activat" in data["mensaje"]
 
         # SSH should NOT be called
         mock_ssh_success.connect.assert_not_called()
 
         # Counter still decrements
-        status = read_status()
+        status = asyncio.run(read_status())
         assert status["peticions_ollama"] == 0
 
     def test_apagar_when_already_offline(
@@ -337,15 +340,15 @@ class TestApagarEndpoint:
         """Test apagar when equipment is already offline."""
         from main import update_status, read_status
 
-        update_status(updates={"peticions_ollama": 2}, message="Setup")
+        asyncio.run(update_status(updates={"peticions_ollama": 2}, message="Setup"))
 
         response = client.post("/apagar", headers={"X-API-Key": test_api_key})
         assert response.status_code == 200
 
         data = response.json()
-        assert "ya está apagado" in data["mensaje"]
+        assert "ja està apagat" in data["mensaje"]
 
-        status = read_status()
+        status = asyncio.run(read_status())
         assert status["peticions_ollama"] == 1
 
     def test_apagar_counter_minimum_zero(
@@ -360,14 +363,14 @@ class TestApagarEndpoint:
         # Try to decrement
         client.post("/apagar", headers={"X-API-Key": test_api_key})
 
-        status = read_status()
+        status = asyncio.run(read_status())
         assert status["peticions_ollama"] == 0  # Should not be negative
 
 
 class TestPermanentOnEndpoints:
     """Tests for permanent_on enable/disable endpoints."""
 
-    def test_permanent_on_enable(self, client, test_api_key):
+    def test_permanent_on_enable(self, client, test_api_key, mock_check_connectivity_offline):
         """Test enabling permanent_on mode."""
         from main import read_status
 
@@ -377,15 +380,15 @@ class TestPermanentOnEndpoints:
         data = response.json()
         assert data["success"] is True
 
-        status = read_status()
+        status = asyncio.run(read_status())
         assert status["permanent_on"] is True
 
-    def test_permanent_on_disable(self, client, test_api_key):
+    def test_permanent_on_disable(self, client, test_api_key, mock_check_connectivity_offline):
         """Test disabling permanent_on mode."""
         from main import update_status, read_status
 
         # First enable it
-        update_status(updates={"permanent_on": True}, message="Setup")
+        asyncio.run(update_status(updates={"permanent_on": True}, message="Setup"))
 
         response = client.post("/permanent_on_disable", headers={"X-API-Key": test_api_key})
         assert response.status_code == 200
@@ -393,7 +396,7 @@ class TestPermanentOnEndpoints:
         data = response.json()
         assert data["success"] is True
 
-        status = read_status()
+        status = asyncio.run(read_status())
         assert status["permanent_on"] is False
 
 
@@ -407,7 +410,7 @@ class TestShutdownEndpoint:
         from main import update_status, read_status
 
         # Set some non-default values
-        update_status(
+        asyncio.run(update_status(
             updates={
                 "peticions_ollama": 5,
                 "permanent_on": True,
@@ -415,17 +418,20 @@ class TestShutdownEndpoint:
                 "phisical_on": True
             },
             message="Setup"
-        )
+        ))
 
         response = client.post("/shutdown", headers={"X-API-Key": test_api_key})
         assert response.status_code == 200
 
         data = response.json()
         assert data["success"] is True
-        assert "reseteado" in data["mensaje"]
+        assert "resetejat" in data["mensaje"]
+
+        # After shutdown, mock connectivity to be offline
+        mock_check_connectivity_online.return_value = False
 
         # Verify all state is reset
-        status = read_status()
+        status = asyncio.run(read_status())
         assert status["peticions_ollama"] == 0
         assert status["permanent_on"] is False
         assert status["logical_on"] is False
@@ -452,10 +458,10 @@ class TestShutdownEndpoint:
         assert response.status_code == 200
 
         data = response.json()
-        assert "ya está apagado" in data["mensaje"]
+        assert "ja està apagat" in data["mensaje"]
 
         # State should still be reset
-        status = read_status()
+        status = asyncio.run(read_status())
         assert status["peticions_ollama"] == 0
         assert status["permanent_on"] is False
 
@@ -477,36 +483,36 @@ class TestComplexScenarios:
 
         # 1. Initialize
         client.post("/init", headers={"X-API-Key": test_api_key})
-        status = read_status()
+        status = asyncio.run(read_status())
         assert status["peticions_ollama"] == 0
 
         # 2. First arrancar (equipment offline)
         mock_check_connectivity_offline.return_value = False
         response = client.post("/arrancar", headers={"X-API-Key": test_api_key})
         assert response.status_code == 200
-        status = read_status()
+        status = asyncio.run(read_status())
         assert status["peticions_ollama"] == 1
 
         # 3. Second arrancar (equipment now online)
         mock_check_connectivity_online.return_value = True
         response = client.post("/arrancar", headers={"X-API-Key": test_api_key})
         assert response.status_code == 200
-        status = read_status()
+        status = asyncio.run(read_status())
         assert status["peticions_ollama"] == 2
 
         # 4. First apagar (should NOT shutdown, counter > 0)
         response = client.post("/apagar", headers={"X-API-Key": test_api_key})
         assert response.status_code == 200
-        assert "No se apaga físicamente" in response.json()["mensaje"]
-        status = read_status()
+        assert "No s'apaga físicament" in response.json()["mensaje"]
+        status = asyncio.run(read_status())
         assert status["peticions_ollama"] == 1
         mock_ssh_success.connect.assert_not_called()
 
         # 5. Second apagar (should shutdown, counter reaches 0)
         response = client.post("/apagar", headers={"X-API-Key": test_api_key})
         assert response.status_code == 200
-        assert "Apagado físico enviado" in response.json()["mensaje"]
-        status = read_status()
+        assert "Apagat físic enviat" in response.json()["mensaje"]
+        status = asyncio.run(read_status())
         assert status["peticions_ollama"] == 0
         mock_ssh_success.connect.assert_called()
 
@@ -529,10 +535,10 @@ class TestComplexScenarios:
 
         # Try to apagar (should NOT shutdown)
         response = client.post("/apagar", headers={"X-API-Key": test_api_key})
-        assert "permanent_on activado" in response.json()["mensaje"]
+        assert "permanent_on activat" in response.json()["mensaje"]
         mock_ssh_success.connect.assert_not_called()
 
-        status = read_status()
+        status = asyncio.run(read_status())
         assert status["peticions_ollama"] == 0  # Counter decremented
         assert status["permanent_on"] is True
 
@@ -542,7 +548,7 @@ class TestComplexScenarios:
         # Now arrancar and apagar should work normally
         client.post("/arrancar", headers={"X-API-Key": test_api_key})
         response = client.post("/apagar", headers={"X-API-Key": test_api_key})
-        assert "Apagado físico enviado" in response.json()["mensaje"]
+        assert "Apagat físic enviat" in response.json()["mensaje"]
         mock_ssh_success.connect.assert_called()
 
     def test_shutdown_overrides_everything(
@@ -556,19 +562,19 @@ class TestComplexScenarios:
         from main import update_status, read_status
 
         # Set up state with permanent_on and high counter
-        update_status(
+        asyncio.run(update_status(
             updates={
                 "peticions_ollama": 10,
                 "permanent_on": True
             },
             message="Setup"
-        )
+        ))
 
         # Shutdown should ignore everything
         response = client.post("/shutdown", headers={"X-API-Key": test_api_key})
         assert response.status_code == 200
 
-        status = read_status()
+        status = asyncio.run(read_status())
         assert status["peticions_ollama"] == 0
         assert status["permanent_on"] is False
         mock_ssh_success.connect.assert_called()

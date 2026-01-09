@@ -54,7 +54,7 @@ def temp_status_dir(tmp_path, monkeypatch):
         "phisical_on": False,
         "peticions_ollama": 0,
         "permanent_on": False,
-        "message": "Equip offline",
+        "message": "Equip desconnectat",
         "datetime": "2024-10-05T12:34:56Z"
     }
 

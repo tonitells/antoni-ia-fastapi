@@ -1,8 +1,8 @@
 {
     "logical_on": false,
-    "phisical_on": false,
+    "phisical_on": true,
     "peticions_ollama": 0,
     "permanent_on": false,
-    "message": "Shutdown forzado: Apagado físico enviado, estado completamente reseteado",
-    "datetime": "2026-01-07T15:59:40.367998Z"
+    "message": "Estat verificat: Equip online però Ollama no respon (timeout)",
+    "datetime": "2026-01-09T18:29:59.645089Z"
 }

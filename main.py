@@ -23,7 +23,7 @@ BASE_STATUS_FILE = Path("status/base.json")
 app = FastAPI(
     title="Antoni IA API",
     description="API para gestión remota del equipo de IA con Ollama",
-    version="1.0.0"
+    version="1.0.0",
 )
 
 API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -44,19 +44,24 @@ WOL_PORT = int(os.getenv("WOL_PORT", "9"))
 
 # ===== FUNCIONES DE GESTIÓN DE ESTADO =====
 
-def read_status() -> dict:
-    """Lee el estado actual desde status.json"""
+
+async def read_status() -> dict:
+    """
+    Lee el estado actual desde status.json y verifica el estado real del equipo.
+    Actualiza logical_on y phisical_on si han cambiado.
+    """
     try:
+        # Leer el estado guardado
         if STATUS_FILE.exists():
-            with open(STATUS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+            with open(STATUS_FILE, "r", encoding="utf-8") as f:
+                current_status = json.load(f)
         else:
             # Si no existe, crear desde base.json
             if BASE_STATUS_FILE.exists():
-                with open(BASE_STATUS_FILE, 'r', encoding='utf-8') as f:
+                with open(BASE_STATUS_FILE, "r", encoding="utf-8") as f:
                     base_status = json.load(f)
                 write_status(base_status)
-                return base_status
+                current_status = base_status
             else:
                 # Si tampoco existe base.json, crear estado por defecto
                 default_status = {
@@ -64,11 +69,61 @@ def read_status() -> dict:
                     "phisical_on": False,
                     "peticions_ollama": 0,
                     "permanent_on": False,
-                    "message": "Equip offline",
-                    "datetime": datetime.utcnow().isoformat() + "Z"
+                    "message": "Equip desconnectat",
+                    "datetime": datetime.utcnow().isoformat() + "Z",
                 }
                 write_status(default_status)
-                return default_status
+                current_status = default_status
+
+        # Verificar el estado real del equipo
+        equipo_online = False
+        ollama_online = False
+        mensaje = ""
+
+        try:
+            equipo_online = await check_host_connectivity(
+                EQUIPO_IA, port=int(SSH_PORT), timeout=2.0
+            )
+
+            if not equipo_online:
+                mensaje = f"Equip no accessible a {EQUIPO_IA}:{SSH_PORT}"
+        except Exception as e:
+            mensaje = f"Error en verificar connectivitat: {str(e)}"
+            equipo_online = False
+
+        # Verificar si Ollama está respondiendo
+        if equipo_online:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.get(
+                        f"http://{EQUIPO_IA}:{OLLAMA_PORT}/api/tags"
+                    )
+                    ollama_online = response.status_code == 200
+                    if ollama_online:
+                        mensaje = "Equip i Ollama funcionant correctament"
+                    else:
+                        mensaje = f"Equip online però Ollama ha respost amb codi {response.status_code}"
+            except httpx.ConnectError as e:
+                mensaje = f"Equip online però no es pot connectar a Ollama al port {OLLAMA_PORT} : {str(e)}"
+            except httpx.TimeoutException:
+                mensaje = "Equip online però Ollama no respon (timeout)"
+            except Exception as e:
+                mensaje = f"Equip online però error en verificar Ollama: {str(e)}"
+        elif not mensaje:
+            mensaje = "Equip apagat o no accessible"
+
+        # Actualizar el estado si ha cambiado
+        if (
+            current_status.get("logical_on") != ollama_online
+            or current_status.get("phisical_on") != equipo_online
+        ):
+            current_status["logical_on"] = ollama_online
+            current_status["phisical_on"] = equipo_online
+            current_status["message"] = f"Estat verificat: {mensaje}"
+            write_status(current_status)
+
+        return current_status
+
     except Exception as e:
         # En caso de error, retornar estado por defecto
         return {
@@ -76,8 +131,8 @@ def read_status() -> dict:
             "phisical_on": False,
             "peticions_ollama": 0,
             "permanent_on": False,
-            "message": f"Error reading status: {str(e)}",
-            "datetime": datetime.utcnow().isoformat() + "Z"
+            "message": f"Error llegint estat: {str(e)}",
+            "datetime": datetime.utcnow().isoformat() + "Z",
         }
 
 
@@ -90,13 +145,13 @@ def write_status(status_data: dict):
         # Actualizar el timestamp
         status_data["datetime"] = datetime.utcnow().isoformat() + "Z"
 
-        with open(STATUS_FILE, 'w', encoding='utf-8') as f:
+        with open(STATUS_FILE, "w", encoding="utf-8") as f:
             json.dump(status_data, f, indent=4, ensure_ascii=False)
     except Exception as e:
         print(f"Error writing status file: {e}")
 
 
-def update_status(updates: dict, message: str):
+async def update_status(updates: dict, message: str):
     """
     Actualiza campos específicos del estado y añade un mensaje.
 
@@ -104,7 +159,7 @@ def update_status(updates: dict, message: str):
         updates: Diccionario con los campos a actualizar
         message: Mensaje descriptivo de la operación
     """
-    status = read_status()
+    status = await read_status()
     status.update(updates)
     status["message"] = message
     write_status(status)
@@ -115,12 +170,14 @@ async def verify_api_key(api_key: str = Security(API_KEY_HEADER)):
     if not api_key or api_key not in API_KEYS:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing API Key"
+            detail="Invalid or missing API Key",
         )
     return api_key
 
 
-async def check_host_connectivity(host: str, port: int = 22, timeout: float = 2.0) -> bool:
+async def check_host_connectivity(
+    host: str, port: int = 22, timeout: float = 2.0
+) -> bool:
     """
     Verifica si un host está online intentando conectarse a un puerto TCP.
     Por defecto usa el puerto SSH (22) que suele estar abierto.
@@ -206,11 +263,7 @@ class OllamaShowRequest(BaseModel):
 
 @app.get("/")
 async def root():
-    return {
-        "api": "Antoni IA API",
-        "version": "1.0.0",
-        "status": "running"
-    }
+    return {"api": "Antoni IA API", "version": "1.0.0", "status": "running"}
 
 
 @app.get("/debug", dependencies=[Security(verify_api_key)])
@@ -234,21 +287,19 @@ async def debug_info():
             "SSH_PASS_SET": bool(SSH_PASS),
             "SSH_SUDO_PASS_SET": bool(SSH_SUDO_PASS),
             "WOL_BROADCAST": WOL_BROADCAST,
-            "WOL_PORT": WOL_PORT
-        }
+            "WOL_PORT": WOL_PORT,
+        },
     }
 
     # Test ping manualmente
     try:
-        if os.name == 'nt':
+        if os.name == "nt":
             cmd = f"ping -n 1 -w 2000 {EQUIPO_IA}"
         else:
             cmd = f"ping -c 1 -W 2 {EQUIPO_IA}"
 
         process = await asyncio.create_subprocess_shell(
-            cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
 
         stdout, stderr = await process.communicate()
@@ -257,17 +308,17 @@ async def debug_info():
             "command": cmd,
             "returncode": process.returncode,
             "stdout": stdout.decode().strip(),
-            "stderr": stderr.decode().strip() if stderr else ""
+            "stderr": stderr.decode().strip() if stderr else "",
         }
     except Exception as e:
-        debug_data["ping_test"] = {
-            "error": str(e)
-        }
+        debug_data["ping_test"] = {"error": str(e)}
 
     return debug_data
 
 
-@app.get("/test", response_model=StatusResponse, dependencies=[Security(verify_api_key)])
+@app.get(
+    "/test", response_model=StatusResponse, dependencies=[Security(verify_api_key)]
+)
 async def test_ia():
     """
     Verifica el estado del equipo de IA y si Ollama está respondiendo.
@@ -280,50 +331,53 @@ async def test_ia():
 
     # Verificar si el equipo está encendido (conexión TCP al puerto SSH)
     try:
-        equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+        equipo_online = await check_host_connectivity(
+            EQUIPO_IA, port=int(SSH_PORT), timeout=2.0
+        )
 
         if not equipo_online:
-            mensaje = f"Equipo no accesible en {EQUIPO_IA}:{SSH_PORT}"
+            mensaje = f"Equip no accessible a {EQUIPO_IA}:{SSH_PORT}"
     except Exception as e:
-        mensaje = f"Error al verificar conectividad: {str(e)}"
+        mensaje = f"Error en verificar connectivitat: {str(e)}"
         equipo_online = False
 
     # Verificar si Ollama está respondiendo
     if equipo_online:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.get(f"http://{EQUIPO_IA}:{OLLAMA_PORT}/api/tags")
+                response = await client.get(
+                    f"http://{EQUIPO_IA}:{OLLAMA_PORT}/api/tags"
+                )
                 ollama_online = response.status_code == 200
                 if ollama_online:
-                    mensaje = "Equipo y Ollama funcionando correctamente"
+                    mensaje = "Equip i Ollama funcionant correctament"
                 else:
-                    mensaje = f"Equipo online pero Ollama respondió con código {response.status_code}"
+                    mensaje = f"Equip online però Ollama ha respost amb codi {response.status_code}"
         except httpx.ConnectError as e:
-            mensaje = f"Equipo online pero no se puede conectar a Ollama en puerto {OLLAMA_PORT} : {str(e)}"
+            mensaje = f"Equip online però no es pot connectar a Ollama al port {OLLAMA_PORT} : {str(e)}"
         except httpx.TimeoutException:
-            mensaje = "Equipo online pero Ollama no responde (timeout)"
+            mensaje = "Equip online però Ollama no respon (timeout)"
         except Exception as e:
-            mensaje = f"Equipo online pero error al verificar Ollama: {str(e)}"
+            mensaje = f"Equip online però error en verificar Ollama: {str(e)}"
     elif not mensaje:
-        mensaje = "Equipo apagado o no accesible"
+        mensaje = "Equip apagat o no accessible"
 
     # Actualizar el estado en el archivo status.json
-    update_status(
-        updates={
-            "logical_on": ollama_online,
-            "phisical_on": equipo_online
-        },
-        message=f"Test: {mensaje}"
+    await update_status(
+        updates={"logical_on": ollama_online, "phisical_on": equipo_online},
+        message=f"Test: {mensaje}",
     )
 
     return StatusResponse(
-        equipo_online=equipo_online,
-        ollama_online=ollama_online,
-        mensaje=mensaje
+        equipo_online=equipo_online, ollama_online=ollama_online, mensaje=mensaje
     )
 
 
-@app.get("/lista_modelos", response_model=ModelsResponse, dependencies=[Security(verify_api_key)])
+@app.get(
+    "/lista_modelos",
+    response_model=ModelsResponse,
+    dependencies=[Security(verify_api_key)],
+)
 async def lista_modelos():
     """
     Lista todos los modelos instalados en Ollama.
@@ -331,13 +385,15 @@ async def lista_modelos():
     """
     try:
         # Verificar si el equipo está encendido
-        equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+        equipo_online = await check_host_connectivity(
+            EQUIPO_IA, port=int(SSH_PORT), timeout=2.0
+        )
 
         if not equipo_online:
             return ModelsResponse(
                 success=False,
-                mensaje=f"El equipo está apagado o no responde en {EQUIPO_IA}:{SSH_PORT}",
-                models=[]
+                mensaje=f"L'equip està apagat o no respon a {EQUIPO_IA}:{SSH_PORT}",
+                models=[],
             )
 
         # Obtener lista de modelos desde Ollama
@@ -347,8 +403,8 @@ async def lista_modelos():
             if response.status_code != 200:
                 return ModelsResponse(
                     success=False,
-                    mensaje=f"Ollama respondió con código {response.status_code}",
-                    models=[]
+                    mensaje=f"Ollama ha respost amb codi {response.status_code}",
+                    models=[],
                 )
 
             data = response.json()
@@ -357,38 +413,40 @@ async def lista_modelos():
             # Parsear la respuesta de Ollama
             if "models" in data:
                 for model in data["models"]:
-                    models.append(ModelInfo(
-                        name=model.get("name", ""),
-                        size=model.get("size"),
-                        modified_at=model.get("modified_at")
-                    ))
+                    models.append(
+                        ModelInfo(
+                            name=model.get("name", ""),
+                            size=model.get("size"),
+                            modified_at=model.get("modified_at"),
+                        )
+                    )
 
             return ModelsResponse(
                 success=True,
-                mensaje=f"Se encontraron {len(models)} modelo(s) instalado(s)",
-                models=models
+                mensaje=f"S'han trobat {len(models)} model(s) instal·lat(s)",
+                models=models,
             )
 
     except httpx.ConnectError:
         return ModelsResponse(
             success=False,
-            mensaje=f"No se puede conectar a Ollama en {EQUIPO_IA}:{OLLAMA_PORT}",
-            models=[]
+            mensaje=f"No es pot connectar a Ollama a {EQUIPO_IA}:{OLLAMA_PORT}",
+            models=[],
         )
     except httpx.TimeoutException:
         return ModelsResponse(
-            success=False,
-            mensaje="Timeout al conectar con Ollama",
-            models=[]
+            success=False, mensaje="Timeout en connectar amb Ollama", models=[]
         )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al obtener lista de modelos: {str(e)}"
+            detail=f"Error en obtenir llista de models: {str(e)}",
         )
 
 
-@app.post("/arrancar", response_model=MessageResponse, dependencies=[Security(verify_api_key)])
+@app.post(
+    "/arrancar", response_model=MessageResponse, dependencies=[Security(verify_api_key)]
+)
 async def arrancar_equipo():
     """
     Envía un magic packet Wake-on-LAN para arrancar el equipo de IA.
@@ -398,52 +456,51 @@ async def arrancar_equipo():
     """
     try:
         # Leer el estado actual
-        current_status = read_status()
+        current_status = await read_status()
 
         # Verificar si el equipo ya está encendido
-        equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+        equipo_online = await check_host_connectivity(
+            EQUIPO_IA, port=int(SSH_PORT), timeout=2.0
+        )
 
         # Incrementar contador de peticiones
         new_peticions = current_status.get("peticions_ollama", 0) + 1
 
         if equipo_online:
             # Actualizar estado: equipo ya online, incrementar contador
-            update_status(
-                updates={
-                    "peticions_ollama": new_peticions,
-                    "phisical_on": True
-                },
-                message=f"Arrancar: Equipo ya encendido. Peticions: {new_peticions}"
+            await update_status(
+                updates={"peticions_ollama": new_peticions, "phisical_on": True},
+                message=f"Arrancar: Equip ja encès. Peticions: {new_peticions}",
             )
 
             return MessageResponse(
                 success=True,
-                mensaje=f"El equipo ya está encendido y respondiendo en {EQUIPO_IA}:{SSH_PORT}. Peticiones Ollama: {new_peticions}"
+                mensaje=f"L'equip ja està encès i responent a {EQUIPO_IA}:{SSH_PORT}. Peticions Ollama: {new_peticions}",
             )
 
         # El equipo está apagado, enviar magic packet
         send_magic_packet(IA_MAC, ip_address=WOL_BROADCAST, port=WOL_PORT)
 
         # Actualizar estado: WOL enviado, incrementar contador
-        update_status(
-            updates={
-                "peticions_ollama": new_peticions
-            },
-            message=f"Arrancar: Magic packet enviado. Peticions: {new_peticions}"
+        await update_status(
+            updates={"peticions_ollama": new_peticions},
+            message=f"Arrancar: Magic packet enviat. Peticions: {new_peticions}",
         )
 
         return MessageResponse(
             success=True,
-            mensaje=f"Magic packet enviado a {IA_MAC} via {WOL_BROADCAST}:{WOL_PORT}. Peticiones Ollama: {new_peticions}"
+            mensaje=f"Magic packet enviat a {IA_MAC} via {WOL_BROADCAST}:{WOL_PORT}. Peticions Ollama: {new_peticions}",
         )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al intentar arrancar equipo: {str(e)}"
+            detail=f"Error en intentar arrencar equip: {str(e)}",
         )
 
 
-@app.post("/apagar", response_model=MessageResponse, dependencies=[Security(verify_api_key)])
+@app.post(
+    "/apagar", response_model=MessageResponse, dependencies=[Security(verify_api_key)]
+)
 async def apagar_equipo():
     """
     Gestiona el apagado del equipo con sistema de contador de peticiones.
@@ -456,30 +513,32 @@ async def apagar_equipo():
     ssh = None
     try:
         # Leer el estado actual
-        current_status = read_status()
+        current_status = await read_status()
 
         # Verificar si el equipo ya está apagado
-        equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+        equipo_online = await check_host_connectivity(
+            EQUIPO_IA, port=int(SSH_PORT), timeout=2.0
+        )
 
         if not equipo_online:
             # Equipo ya apagado, decrementar contador (mínimo 0)
             new_peticions = max(0, current_status.get("peticions_ollama", 0) - 1)
-            update_status(
+            await update_status(
                 updates={
                     "peticions_ollama": new_peticions,
                     "phisical_on": False,
-                    "logical_on": False
+                    "logical_on": False,
                 },
-                message=f"Apagar: Equipo ya apagado. Peticions: {new_peticions}"
+                message=f"Apagar: Equip ja apagat. Peticions: {new_peticions}",
             )
 
             return MessageResponse(
                 success=True,
-                mensaje=f"El equipo ya está apagado. Peticiones Ollama: {new_peticions}"
+                mensaje=f"L'equip ja està apagat. Peticions Ollama: {new_peticions}",
             )
-
-        # Decrementar contador de peticiones (mínimo 0)
-        new_peticions = max(0, current_status.get("peticions_ollama", 0) - 1)
+        else:
+            # Decrementar contador de peticiones (mínimo 0)
+            new_peticions = max(0, current_status.get("peticions_ollama", 0) - 1)
         permanent_on = current_status.get("permanent_on", False)
 
         # Determinar si se debe apagar físicamente
@@ -487,17 +546,19 @@ async def apagar_equipo():
 
         if not should_shutdown_physically:
             # No apagar físicamente, solo actualizar contador
-            reason = "permanent_on activado" if permanent_on else f"hay {new_peticions} petición(es) activa(s)"
-            update_status(
-                updates={
-                    "peticions_ollama": new_peticions
-                },
-                message=f"Apagar: No se apaga físicamente ({reason}). Peticions: {new_peticions}"
+            reason = (
+                "permanent_on activat"
+                if permanent_on
+                else f"hi ha {new_peticions} petició(ns) activa(es)"
+            )
+            await update_status(
+                updates={"peticions_ollama": new_peticions},
+                message=f"Apagar: No s'apaga físicament ({reason}). Peticions: {new_peticions}",
             )
 
             return MessageResponse(
                 success=True,
-                mensaje=f"Contador decrementado a {new_peticions}. No se apaga físicamente: {reason}"
+                mensaje=f"Comptador decrementat a {new_peticions}. No s'apaga físicament: {reason}",
             )
 
         # Apagar físicamente el equipo
@@ -509,7 +570,7 @@ async def apagar_equipo():
             port=SSH_PORT,
             username=SSH_USER,
             password=SSH_PASS,
-            timeout=5
+            timeout=5,
         )
 
         # Ejecutar shutdown con sudo usando la contraseña desde SSH_SUDO_PASS
@@ -519,8 +580,8 @@ async def apagar_equipo():
 
         # Esperar un momento para que el comando se procese
         exit_status = stdout.channel.recv_exit_status()
-        error_output = stderr.read().decode('utf-8', errors='ignore').strip()
-        std_output = stdout.read().decode('utf-8', errors='ignore').strip()
+        error_output = stderr.read().decode("utf-8", errors="ignore").strip()
+        std_output = stdout.read().decode("utf-8", errors="ignore").strip()
 
         ssh.close()
 
@@ -534,7 +595,7 @@ async def apagar_equipo():
                     port=SSH_PORT,
                     username=SSH_USER,
                     password=SSH_PASS,
-                    timeout=5
+                    timeout=5,
                 )
 
                 stdin, stdout, stderr = ssh.exec_command("shutdown -h now")
@@ -543,32 +604,32 @@ async def apagar_equipo():
                 ssh.close()
 
                 if exit_status2 != 0:
-                    error_msg = f"Error al ejecutar shutdown. Salida: {std_output}. Error: {error_output}"
+                    error_msg = f"Error en executar shutdown. Sortida: {std_output}. Error: {error_output}"
                     raise HTTPException(
                         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail=error_msg
+                        detail=error_msg,
                     )
             except HTTPException:
                 raise
             except Exception as e2:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Sudo falló y shutdown sin sudo también: {error_output}. {str(e2)}"
+                    detail=f"Sudo ha fallat i shutdown sense sudo també: {error_output}. {str(e2)}",
                 )
 
         # Actualizar estado: apagado físico enviado
-        update_status(
+        await update_status(
             updates={
                 "peticions_ollama": new_peticions,
                 "logical_on": False,
-                "phisical_on": False
+                "phisical_on": False,
             },
-            message=f"Apagar: Apagado físico enviado. Peticions: {new_peticions}"
+            message=f"Apagar: Apagat físic enviat. Peticions: {new_peticions}",
         )
 
         return MessageResponse(
             success=True,
-            mensaje=f"Apagado físico enviado. Peticiones: {new_peticions}. El equipo se apagará en breve."
+            mensaje=f"Apagat físic enviat. Peticions: {new_peticions}. L'equip s'apagarà aviat.",
         )
 
     except HTTPException:
@@ -576,12 +637,12 @@ async def apagar_equipo():
     except paramiko.AuthenticationException:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Error de autenticación SSH. Verifica SSH_USER y SSH_PASS"
+            detail="Error d'autenticació SSH. Verifica SSH_USER i SSH_PASS",
         )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al apagar equipo via SSH: {str(e)}"
+            detail=f"Error en apagar equip via SSH: {str(e)}",
         )
     finally:
         if ssh:
@@ -591,7 +652,11 @@ async def apagar_equipo():
                 pass
 
 
-@app.post("/permanent_on_enable", response_model=MessageResponse, dependencies=[Security(verify_api_key)])
+@app.post(
+    "/permanent_on_enable",
+    response_model=MessageResponse,
+    dependencies=[Security(verify_api_key)],
+)
 async def permanent_on_enable():
     """
     Activa el modo permanent_on.
@@ -599,23 +664,27 @@ async def permanent_on_enable():
     Requiere API Key en header X-API-Key.
     """
     try:
-        update_status(
+        await update_status(
             updates={"permanent_on": True},
-            message="Permanent_on activado: el equipo no se apagará automáticamente"
+            message="Permanent_on activat: l'equip no s'apagarà automàticament",
         )
 
         return MessageResponse(
             success=True,
-            mensaje="Modo permanent_on activado. El equipo no se apagará automáticamente."
+            mensaje="Mode permanent_on activat. L'equip no s'apagarà automàticament.",
         )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al activar permanent_on: {str(e)}"
+            detail=f"Error en activar permanent_on: {str(e)}",
         )
 
 
-@app.post("/permanent_on_disable", response_model=MessageResponse, dependencies=[Security(verify_api_key)])
+@app.post(
+    "/permanent_on_disable",
+    response_model=MessageResponse,
+    dependencies=[Security(verify_api_key)],
+)
 async def permanent_on_disable():
     """
     Desactiva el modo permanent_on.
@@ -623,19 +692,19 @@ async def permanent_on_disable():
     Requiere API Key en header X-API-Key.
     """
     try:
-        update_status(
+        await update_status(
             updates={"permanent_on": False},
-            message="Permanent_on desactivado: el equipo podrá apagarse automáticamente"
+            message="Permanent_on desactivat: l'equip es podrà apagar automàticament",
         )
 
         return MessageResponse(
             success=True,
-            mensaje="Modo permanent_on desactivado. El equipo podrá apagarse automáticamente."
+            mensaje="Mode permanent_on desactivat. L'equip es podrà apagar automàticament.",
         )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al desactivar permanent_on: {str(e)}"
+            detail=f"Error en desactivar permanent_on: {str(e)}",
         )
 
 
@@ -646,13 +715,14 @@ async def get_status():
     Muestra logical_on, phisical_on, peticions_ollama, permanent_on, message y datetime.
     Requiere API Key en header X-API-Key.
     """
+
     try:
-        current_status = read_status()
+        current_status = await read_status()
         return current_status
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al leer estado: {str(e)}"
+            detail=f"Error en llegir estat: {str(e)}",
         )
 
 
@@ -674,58 +744,66 @@ async def init_status():
 
         # Verificar si el equipo está encendido (conexión TCP al puerto SSH)
         try:
-            equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+            equipo_online = await check_host_connectivity(
+                EQUIPO_IA, port=int(SSH_PORT), timeout=2.0
+            )
 
             if not equipo_online:
-                mensaje = f"Equipo no accesible en {EQUIPO_IA}:{SSH_PORT}"
+                mensaje = f"Equip no accessible a {EQUIPO_IA}:{SSH_PORT}"
         except Exception as e:
-            mensaje = f"Error al verificar conectividad: {str(e)}"
+            mensaje = f"Error en verificar connectivitat: {str(e)}"
             equipo_online = False
 
         # Verificar si Ollama está respondiendo
         if equipo_online:
             try:
                 async with httpx.AsyncClient(timeout=5.0) as client:
-                    response = await client.get(f"http://{EQUIPO_IA}:{OLLAMA_PORT}/api/tags")
+                    response = await client.get(
+                        f"http://{EQUIPO_IA}:{OLLAMA_PORT}/api/tags"
+                    )
                     ollama_online = response.status_code == 200
                     if ollama_online:
-                        mensaje = "Init: Equipo y Ollama funcionando correctamente"
+                        mensaje = "Init: Equip i Ollama funcionant correctament"
                     else:
-                        mensaje = f"Init: Equipo online pero Ollama respondió con código {response.status_code}"
+                        mensaje = f"Init: Equip online però Ollama ha respost amb codi {response.status_code}"
             except httpx.ConnectError:
-                mensaje = f"Init: Equipo online pero no se puede conectar a Ollama en puerto {OLLAMA_PORT}"
+                mensaje = f"Init: Equip online però no es pot connectar a Ollama al port {OLLAMA_PORT}"
             except httpx.TimeoutException:
-                mensaje = "Init: Equipo online pero Ollama no responde (timeout)"
+                mensaje = "Init: Equip online però Ollama no respon (timeout)"
             except Exception as e:
-                mensaje = f"Init: Equipo online pero error al verificar Ollama: {str(e)}"
+                mensaje = (
+                    f"Init: Equip online però error en verificar Ollama: {str(e)}"
+                )
         else:
-            mensaje = "Init: Equipo apagado o no accesible"
+            mensaje = "Init: Equip apagat o no accessible"
 
         # Inicializar el estado con valores reseteados
-        new_status = update_status(
+        new_status = await update_status(
             updates={
                 "logical_on": ollama_online,
                 "phisical_on": equipo_online,
                 "peticions_ollama": 0,
-                "permanent_on": False
+                "permanent_on": False,
             },
-            message=mensaje
+            message=mensaje,
         )
 
         return {
             "success": True,
-            "mensaje": f"Estado inicializado. {mensaje}",
-            "status": new_status
+            "mensaje": f"Estat inicialitzat. {mensaje}",
+            "status": new_status,
         }
 
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al inicializar estado: {str(e)}"
+            detail=f"Error en inicialitzar estat: {str(e)}",
         )
 
 
-@app.post("/shutdown", response_model=MessageResponse, dependencies=[Security(verify_api_key)])
+@app.post(
+    "/shutdown", response_model=MessageResponse, dependencies=[Security(verify_api_key)]
+)
 async def shutdown_force():
     """
     Apagado forzado del equipo.
@@ -736,23 +814,25 @@ async def shutdown_force():
     ssh = None
     try:
         # Verificar si el equipo está online
-        equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+        equipo_online = await check_host_connectivity(
+            EQUIPO_IA, port=int(SSH_PORT), timeout=2.0
+        )
 
         if not equipo_online:
             # Equipo ya apagado, solo resetear estado
-            update_status(
+            await update_status(
                 updates={
                     "permanent_on": False,
                     "logical_on": False,
                     "phisical_on": False,
-                    "peticions_ollama": 0
+                    "peticions_ollama": 0,
                 },
-                message="Shutdown forzado: Equipo ya estaba apagado, estado reseteado"
+                message="Shutdown forçat: Equip ja estava apagat, estat resetejat",
             )
 
             return MessageResponse(
                 success=True,
-                mensaje="El equipo ya está apagado. Estado reseteado completamente."
+                mensaje="L'equip ja està apagat. Estat resetejat completament.",
             )
 
         # Equipo está encendido, proceder con apagado forzado
@@ -764,7 +844,7 @@ async def shutdown_force():
             port=SSH_PORT,
             username=SSH_USER,
             password=SSH_PASS,
-            timeout=5
+            timeout=5,
         )
 
         # Ejecutar shutdown con sudo
@@ -772,8 +852,8 @@ async def shutdown_force():
         stdin, stdout, stderr = ssh.exec_command(shutdown_command)
 
         exit_status = stdout.channel.recv_exit_status()
-        error_output = stderr.read().decode('utf-8', errors='ignore').strip()
-        std_output = stdout.read().decode('utf-8', errors='ignore').strip()
+        error_output = stderr.read().decode("utf-8", errors="ignore").strip()
+        std_output = stdout.read().decode("utf-8", errors="ignore").strip()
 
         ssh.close()
 
@@ -787,7 +867,7 @@ async def shutdown_force():
                     port=SSH_PORT,
                     username=SSH_USER,
                     password=SSH_PASS,
-                    timeout=5
+                    timeout=5,
                 )
 
                 stdin, stdout, stderr = ssh.exec_command("shutdown -h now")
@@ -796,33 +876,33 @@ async def shutdown_force():
                 ssh.close()
 
                 if exit_status2 != 0:
-                    error_msg = f"Error al ejecutar shutdown. Salida: {std_output}. Error: {error_output}"
+                    error_msg = f"Error en executar shutdown. Sortida: {std_output}. Error: {error_output}"
                     raise HTTPException(
                         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail=error_msg
+                        detail=error_msg,
                     )
             except HTTPException:
                 raise
             except Exception as e2:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Sudo falló y shutdown sin sudo también: {error_output}. {str(e2)}"
+                    detail=f"Sudo ha fallat i shutdown sense sudo també: {error_output}. {str(e2)}",
                 )
 
         # Actualizar estado: todo reseteado
-        update_status(
+        await update_status(
             updates={
                 "permanent_on": False,
                 "logical_on": False,
                 "phisical_on": False,
-                "peticions_ollama": 0
+                "peticions_ollama": 0,
             },
-            message="Shutdown forzado: Apagado físico enviado, estado completamente reseteado"
+            message="Shutdown forçat: Apagat físic enviat, estat completament resetejat",
         )
 
         return MessageResponse(
             success=True,
-            mensaje="Apagado forzado enviado. Estado completamente reseteado. El equipo se apagará en breve."
+            mensaje="Apagat forçat enviat. Estat completament resetejat. L'equip s'apagarà aviat.",
         )
 
     except HTTPException:
@@ -830,12 +910,12 @@ async def shutdown_force():
     except paramiko.AuthenticationException:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Error de autenticación SSH. Verifica SSH_USER y SSH_PASS"
+            detail="Error d'autenticació SSH. Verifica SSH_USER i SSH_PASS",
         )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al ejecutar shutdown forzado: {str(e)}"
+            detail=f"Error en executar shutdown forçat: {str(e)}",
         )
     finally:
         if ssh:
@@ -847,6 +927,7 @@ async def shutdown_force():
 
 # ===== ENDPOINTS DE PROXY A OLLAMA =====
 
+
 @app.post("/ollama/generate", dependencies=[Security(verify_api_key)])
 async def ollama_generate(request: OllamaGenerateRequest):
     """
@@ -856,11 +937,13 @@ async def ollama_generate(request: OllamaGenerateRequest):
     """
     try:
         # Verificar que el equipo esté online
-        equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+        equipo_online = await check_host_connectivity(
+            EQUIPO_IA, port=int(SSH_PORT), timeout=2.0
+        )
         if not equipo_online:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"El equipo de IA está apagado o no responde en {EQUIPO_IA}:{SSH_PORT}"
+                detail=f"L'equip d'IA està apagat o no respon a {EQUIPO_IA}:{SSH_PORT}",
             )
 
         url = f"http://{EQUIPO_IA}:{OLLAMA_PORT}/api/generate"
@@ -869,19 +952,20 @@ async def ollama_generate(request: OllamaGenerateRequest):
             if request.stream:
                 # Streaming response
                 async def stream_generator():
-                    async with client.stream('POST', url, json=request.model_dump()) as response:
+                    async with client.stream(
+                        "POST", url, json=request.model_dump()
+                    ) as response:
                         if response.status_code != 200:
                             error_text = await response.aread()
                             raise HTTPException(
                                 status_code=response.status_code,
-                                detail=f"Ollama error: {error_text.decode()}"
+                                detail=f"Error d'Ollama: {error_text.decode()}",
                             )
                         async for chunk in response.aiter_bytes():
                             yield chunk
 
                 return StreamingResponse(
-                    stream_generator(),
-                    media_type="application/x-ndjson"
+                    stream_generator(), media_type="application/x-ndjson"
                 )
             else:
                 # Non-streaming response
@@ -889,26 +973,26 @@ async def ollama_generate(request: OllamaGenerateRequest):
                 if response.status_code != 200:
                     raise HTTPException(
                         status_code=response.status_code,
-                        detail=f"Ollama error: {response.text}"
+                        detail=f"Error d'Ollama: {response.text}",
                     )
                 return response.json()
 
     except httpx.ConnectError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"No se puede conectar a Ollama en {EQUIPO_IA}:{OLLAMA_PORT}"
+            detail=f"No es pot connectar a Ollama a {EQUIPO_IA}:{OLLAMA_PORT}",
         )
     except httpx.TimeoutException:
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="Timeout al conectar con Ollama"
+            detail="Timeout en connectar amb Ollama",
         )
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error en proxy generate: {str(e)}"
+            detail=f"Error en proxy generate: {str(e)}",
         )
 
 
@@ -921,11 +1005,13 @@ async def ollama_chat(request: OllamaChatRequest):
     """
     try:
         # Verificar que el equipo esté online
-        equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+        equipo_online = await check_host_connectivity(
+            EQUIPO_IA, port=int(SSH_PORT), timeout=2.0
+        )
         if not equipo_online:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"El equipo de IA está apagado o no responde en {EQUIPO_IA}:{SSH_PORT}"
+                detail=f"L'equip d'IA està apagat o no respon a {EQUIPO_IA}:{SSH_PORT}",
             )
 
         url = f"http://{EQUIPO_IA}:{OLLAMA_PORT}/api/chat"
@@ -934,19 +1020,20 @@ async def ollama_chat(request: OllamaChatRequest):
             if request.stream:
                 # Streaming response
                 async def stream_generator():
-                    async with client.stream('POST', url, json=request.model_dump()) as response:
+                    async with client.stream(
+                        "POST", url, json=request.model_dump()
+                    ) as response:
                         if response.status_code != 200:
                             error_text = await response.aread()
                             raise HTTPException(
                                 status_code=response.status_code,
-                                detail=f"Ollama error: {error_text.decode()}"
+                                detail=f"Error d'Ollama: {error_text.decode()}",
                             )
                         async for chunk in response.aiter_bytes():
                             yield chunk
 
                 return StreamingResponse(
-                    stream_generator(),
-                    media_type="application/x-ndjson"
+                    stream_generator(), media_type="application/x-ndjson"
                 )
             else:
                 # Non-streaming response
@@ -954,26 +1041,26 @@ async def ollama_chat(request: OllamaChatRequest):
                 if response.status_code != 200:
                     raise HTTPException(
                         status_code=response.status_code,
-                        detail=f"Ollama error: {response.text}"
+                        detail=f"Error d'Ollama: {response.text}",
                     )
                 return response.json()
 
     except httpx.ConnectError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"No se puede conectar a Ollama en {EQUIPO_IA}:{OLLAMA_PORT}"
+            detail=f"No es pot connectar a Ollama a {EQUIPO_IA}:{OLLAMA_PORT}",
         )
     except httpx.TimeoutException:
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="Timeout al conectar con Ollama"
+            detail="Timeout en connectar amb Ollama",
         )
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error en proxy chat: {str(e)}"
+            detail=f"Error en proxy chat: {str(e)}",
         )
 
 
@@ -986,32 +1073,37 @@ async def ollama_pull(request: OllamaPullRequest):
     """
     try:
         # Verificar que el equipo esté online
-        equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+        equipo_online = await check_host_connectivity(
+            EQUIPO_IA, port=int(SSH_PORT), timeout=2.0
+        )
         if not equipo_online:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"El equipo de IA está apagado o no responde en {EQUIPO_IA}:{SSH_PORT}"
+                detail=f"L'equip d'IA està apagat o no respon a {EQUIPO_IA}:{SSH_PORT}",
             )
 
         url = f"http://{EQUIPO_IA}:{OLLAMA_PORT}/api/pull"
 
-        async with httpx.AsyncClient(timeout=3600.0) as client:  # 1 hora timeout para pulls grandes
+        async with httpx.AsyncClient(
+            timeout=3600.0
+        ) as client:  # 1 hora timeout para pulls grandes
             if request.stream:
                 # Streaming response para ver progreso
                 async def stream_generator():
-                    async with client.stream('POST', url, json=request.model_dump()) as response:
+                    async with client.stream(
+                        "POST", url, json=request.model_dump()
+                    ) as response:
                         if response.status_code != 200:
                             error_text = await response.aread()
                             raise HTTPException(
                                 status_code=response.status_code,
-                                detail=f"Ollama error: {error_text.decode()}"
+                                detail=f"Error d'Ollama: {error_text.decode()}",
                             )
                         async for chunk in response.aiter_bytes():
                             yield chunk
 
                 return StreamingResponse(
-                    stream_generator(),
-                    media_type="application/x-ndjson"
+                    stream_generator(), media_type="application/x-ndjson"
                 )
             else:
                 # Non-streaming response
@@ -1019,26 +1111,26 @@ async def ollama_pull(request: OllamaPullRequest):
                 if response.status_code != 200:
                     raise HTTPException(
                         status_code=response.status_code,
-                        detail=f"Ollama error: {response.text}"
+                        detail=f"Error d'Ollama: {response.text}",
                     )
                 return response.json()
 
     except httpx.ConnectError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"No se puede conectar a Ollama en {EQUIPO_IA}:{OLLAMA_PORT}"
+            detail=f"No es pot connectar a Ollama a {EQUIPO_IA}:{OLLAMA_PORT}",
         )
     except httpx.TimeoutException:
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="Timeout al descargar modelo (puede que sea muy grande)"
+            detail="Timeout en descarregar model (pot ser que sigui molt gran)",
         )
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error en proxy pull: {str(e)}"
+            detail=f"Error en proxy pull: {str(e)}",
         )
 
 
@@ -1050,11 +1142,13 @@ async def ollama_delete(request: OllamaDeleteRequest):
     """
     try:
         # Verificar que el equipo esté online
-        equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+        equipo_online = await check_host_connectivity(
+            EQUIPO_IA, port=int(SSH_PORT), timeout=2.0
+        )
         if not equipo_online:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"El equipo de IA está apagado o no responde en {EQUIPO_IA}:{SSH_PORT}"
+                detail=f"L'equip d'IA està apagat o no respon a {EQUIPO_IA}:{SSH_PORT}",
             )
 
         url = f"http://{EQUIPO_IA}:{OLLAMA_PORT}/api/delete"
@@ -1065,30 +1159,30 @@ async def ollama_delete(request: OllamaDeleteRequest):
             if response.status_code != 200:
                 raise HTTPException(
                     status_code=response.status_code,
-                    detail=f"Ollama error: {response.text}"
+                    detail=f"Error d'Ollama: {response.text}",
                 )
 
             return {
                 "success": True,
-                "mensaje": f"Modelo '{request.name}' eliminado correctamente"
+                "mensaje": f"Model '{request.name}' eliminat correctament",
             }
 
     except httpx.ConnectError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"No se puede conectar a Ollama en {EQUIPO_IA}:{OLLAMA_PORT}"
+            detail=f"No es pot connectar a Ollama a {EQUIPO_IA}:{OLLAMA_PORT}",
         )
     except httpx.TimeoutException:
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="Timeout al eliminar modelo"
+            detail="Timeout en eliminar model",
         )
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error en proxy delete: {str(e)}"
+            detail=f"Error en proxy delete: {str(e)}",
         )
 
 
@@ -1100,11 +1194,13 @@ async def ollama_show(request: OllamaShowRequest):
     """
     try:
         # Verificar que el equipo esté online
-        equipo_online = await check_host_connectivity(EQUIPO_IA, port=int(SSH_PORT), timeout=2.0)
+        equipo_online = await check_host_connectivity(
+            EQUIPO_IA, port=int(SSH_PORT), timeout=2.0
+        )
         if not equipo_online:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"El equipo de IA está apagado o no responde en {EQUIPO_IA}:{SSH_PORT}"
+                detail=f"L'equip d'IA està apagat o no respon a {EQUIPO_IA}:{SSH_PORT}",
             )
 
         url = f"http://{EQUIPO_IA}:{OLLAMA_PORT}/api/show"
@@ -1115,7 +1211,7 @@ async def ollama_show(request: OllamaShowRequest):
             if response.status_code != 200:
                 raise HTTPException(
                     status_code=response.status_code,
-                    detail=f"Ollama error: {response.text}"
+                    detail=f"Error d'Ollama: {response.text}",
                 )
 
             return response.json()
@@ -1123,22 +1219,23 @@ async def ollama_show(request: OllamaShowRequest):
     except httpx.ConnectError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"No se puede conectar a Ollama en {EQUIPO_IA}:{OLLAMA_PORT}"
+            detail=f"No es pot connectar a Ollama a {EQUIPO_IA}:{OLLAMA_PORT}",
         )
     except httpx.TimeoutException:
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="Timeout al obtener información del modelo"
+            detail="Timeout en obtenir informació del model",
         )
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error en proxy show: {str(e)}"
+            detail=f"Error en proxy show: {str(e)}",
         )
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
