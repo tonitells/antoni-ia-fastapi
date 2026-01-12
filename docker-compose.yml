@@ -7,11 +7,14 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+    volumes:
+      - /home/antoni/docker/n8n/N8NOUT:/home/antoni/docker/n8n/N8NOUT
+      - ./status:/app/status
 
     # Configuración de red y puertos se define en los archivos de override:
     # - docker-compose.traefik.yml: Para usar con Traefik (red proxy)
     # - docker-compose.host.yml: Para modo host (WOL)
-  
+
 networks:
   proxy:
     external: true

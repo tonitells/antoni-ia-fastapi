@@ -261,6 +261,18 @@ class OllamaShowRequest(BaseModel):
     name: str  # nombre del modelo
 
 
+class SaveAudioRequest(BaseModel):
+    audio_base64: str
+    filename: str = Field(default="output.wav", description="Nom del fitxer de sortida")
+    output_path: str = Field(default="/home/antoni/docker/n8n/N8NOUT", description="Ruta del directori de sortida")
+
+
+class SaveAudioResponse(BaseModel):
+    success: bool
+    path: str
+    size: int
+
+
 @app.get("/")
 async def root():
     return {"api": "Antoni IA API", "version": "1.0.0", "status": "running"}
@@ -314,6 +326,57 @@ async def debug_info():
         debug_data["ping_test"] = {"error": str(e)}
 
     return debug_data
+
+
+@app.post(
+    "/save_file",
+    response_model=SaveAudioResponse,
+    dependencies=[Security(verify_api_key)],
+)
+async def save_file(request: SaveAudioRequest):
+    """
+    Guarda un archivo codificado en base64 en el disco.
+    Compatible con el flujo n8n "Piper TTS - write file to disk".
+    Requiere API Key en header X-API-Key.
+    """
+    import base64
+
+    try:
+        # Decodificar base64
+        try:
+            audio_bytes = base64.b64decode(request.audio_base64)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Error en decodificar base64: {str(e)}",
+            )
+
+        # Definir ruta de salida desde parámetro
+        output_dir = Path(request.output_path)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / request.filename
+
+        # Guardar archivo
+        try:
+            with open(output_path, "wb") as f:
+                f.write(audio_bytes)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error en guardar fitxer: {str(e)}",
+            )
+
+        return SaveAudioResponse(
+            success=True, path=str(output_path), size=len(audio_bytes)
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error inesperat: {str(e)}",
+        )
 
 
 @app.get(
