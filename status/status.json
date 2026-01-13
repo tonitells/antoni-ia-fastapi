@@ -1,8 +1,9 @@
 {
-    "logical_on": false,
+    "logical_on": true,
     "phisical_on": true,
     "peticions_ollama": 0,
-    "permanent_on": false,
-    "message": "Estat verificat: Equip online però Ollama no respon (timeout)",
-    "datetime": "2026-01-09T18:29:59.645089Z"
+    "permanent_on": true,
+    "message": "Apagar: No s'apaga físicament (permanent_on activat). Peticions: 0",
+    "datetime": "2026-01-13T15:04:58.726973Z",
+    "closing_datetime": null
 }

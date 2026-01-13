@@ -4,5 +4,6 @@
     "peticions_ollama":0,
     "permanent_on":false,
     "message":"Equip offline",
-    "datetime": "2024-10-05T12:34:56Z"
+    "datetime": "2024-10-05T12:34:56Z",
+    "closing_datetime": null
 }

@@ -40,6 +40,8 @@ API_KEYS = os.getenv("API_KEYS", "").split(",")
 # Dirección de broadcast para Wake-on-LAN (por defecto usa la de la red del equipo)
 WOL_BROADCAST = os.getenv("WOL_BROADCAST", "255.255.255.255")
 WOL_PORT = int(os.getenv("WOL_PORT", "9"))
+# Delay en minutos para apagado automático
+DELAY_MINUTS_APAGAR = int(os.getenv("DELAY_MINUTS_APAGAR", "5"))
 
 
 # ===== FUNCIONES DE GESTIÓN DE ESTADO =====
@@ -71,6 +73,7 @@ async def read_status() -> dict:
                     "permanent_on": False,
                     "message": "Equip desconnectat",
                     "datetime": datetime.utcnow().isoformat() + "Z",
+                    "closing_datetime": None,
                 }
                 write_status(default_status)
                 current_status = default_status
@@ -133,6 +136,7 @@ async def read_status() -> dict:
             "permanent_on": False,
             "message": f"Error llegint estat: {str(e)}",
             "datetime": datetime.utcnow().isoformat() + "Z",
+            "closing_datetime": None,
         }
 
 
@@ -198,6 +202,175 @@ async def check_host_connectivity(
             sock.close()
         except:
             pass
+
+
+async def execute_physical_shutdown() -> dict:
+    """
+    Ejecuta el apagado físico del equipo via SSH.
+    Retorna un diccionario con success (bool) y mensaje (str).
+    """
+    ssh = None
+    try:
+        # Verificar si el equipo está online
+        equipo_online = await check_host_connectivity(
+            EQUIPO_IA, port=int(SSH_PORT), timeout=2.0
+        )
+
+        if not equipo_online:
+            return {
+                "success": False,
+                "mensaje": "L'equip ja està apagat o no és accessible",
+            }
+
+        # Conectar via SSH
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+        ssh.connect(
+            hostname=EQUIPO_IA,
+            port=SSH_PORT,
+            username=SSH_USER,
+            password=SSH_PASS,
+            timeout=5,
+        )
+
+        # Ejecutar shutdown con sudo usando la contraseña desde SSH_SUDO_PASS
+        # Usa sudo -S para leer la contraseña desde stdin
+        shutdown_command = f'echo "{SSH_SUDO_PASS}" | sudo -S shutdown -h now'
+        stdin, stdout, stderr = ssh.exec_command(shutdown_command)
+
+        # Esperar un momento para que el comando se procese
+        exit_status = stdout.channel.recv_exit_status()
+        error_output = stderr.read().decode("utf-8", errors="ignore").strip()
+        std_output = stdout.read().decode("utf-8", errors="ignore").strip()
+
+        ssh.close()
+
+        # Si el comando con sudo falló, intentar sin sudo como respaldo
+        if exit_status != 0:
+            try:
+                ssh = paramiko.SSHClient()
+                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                ssh.connect(
+                    hostname=EQUIPO_IA,
+                    port=SSH_PORT,
+                    username=SSH_USER,
+                    password=SSH_PASS,
+                    timeout=5,
+                )
+
+                stdin, stdout, stderr = ssh.exec_command("shutdown -h now")
+                exit_status2 = stdout.channel.recv_exit_status()
+
+                ssh.close()
+
+                if exit_status2 != 0:
+                    return {
+                        "success": False,
+                        "mensaje": f"Error en executar shutdown. Sortida: {std_output}. Error: {error_output}",
+                    }
+            except Exception as e2:
+                return {
+                    "success": False,
+                    "mensaje": f"Sudo ha fallat i shutdown sense sudo també: {error_output}. {str(e2)}",
+                }
+
+        return {
+            "success": True,
+            "mensaje": "Apagat físic enviat correctament. L'equip s'apagarà aviat.",
+        }
+
+    except Exception as e:
+        return {"success": False, "mensaje": f"Error en apagar equip: {str(e)}"}
+    finally:
+        if ssh:
+            try:
+                ssh.close()
+            except:
+                pass
+
+
+async def shutdown_scheduler():
+    """
+    Tasca en background que s'executa cada minut per comprovar si cal apagar el equip.
+    Verifica:
+    - peticions_ollama == 0
+    - permanent_on == False
+    - closing_datetime no és null i ha arribat el moment
+    Si tot es compleix, executa l'apagat físic.
+    """
+    while True:
+        try:
+            await asyncio.sleep(60)  # Esperar 1 minut
+
+            # Llegir l'estat actual
+            current_status = await read_status()
+
+            peticions_ollama = current_status.get("peticions_ollama", 0)
+            permanent_on = current_status.get("permanent_on", False)
+            closing_datetime_str = current_status.get("closing_datetime")
+
+            # Verificar condicions per apagar
+            if peticions_ollama == 0 and not permanent_on and closing_datetime_str:
+                # Parsejar closing_datetime
+                try:
+                    closing_datetime = datetime.fromisoformat(
+                        closing_datetime_str.replace("Z", "+00:00")
+                    )
+                    now = datetime.utcnow()
+
+                    # Comprovar si ha arribat el moment d'apagar
+                    if now >= closing_datetime:
+                        print(
+                            f"[Shutdown Scheduler] Temps d'apagat arribat. Executant apagat físic..."
+                        )
+
+                        # Executar apagat físic
+                        result = await execute_physical_shutdown()
+
+                        if result["success"]:
+                            # Actualitzar estat
+                            await update_status(
+                                updates={
+                                    "peticions_ollama": 0,
+                                    "logical_on": False,
+                                    "phisical_on": False,
+                                    "closing_datetime": None,
+                                },
+                                message=f"Scheduler: {result['mensaje']}",
+                            )
+                            print(f"[Shutdown Scheduler] {result['mensaje']}")
+                        else:
+                            print(
+                                f"[Shutdown Scheduler] Error en apagar: {result['mensaje']}"
+                            )
+                            # No actualitzar closing_datetime per que ho intenti de nou en el proper cicle
+                    else:
+                        # Encara no ha arribat el moment
+                        temps_restant = (closing_datetime - now).total_seconds()
+                        print(
+                            f"[Shutdown Scheduler] Temps restant fins apagat: {temps_restant:.0f} segons"
+                        )
+
+                except Exception as e:
+                    print(
+                        f"[Shutdown Scheduler] Error en parsejar closing_datetime: {e}"
+                    )
+
+        except Exception as e:
+            print(f"[Shutdown Scheduler] Error en executar scheduler: {e}")
+            # Continuar el loop encara que hi hagi errors
+
+
+@app.on_event("startup")
+async def startup_event():
+    """
+    Event que s'executa quan arrenca l'aplicació.
+    Inicia la tasca en background per al scheduler d'apagat.
+    """
+    print("[Startup] Iniciant shutdown scheduler...")
+    asyncio.create_task(shutdown_scheduler())
+    print("[Startup] Shutdown scheduler iniciat correctament")
 
 
 class StatusResponse(BaseModel):
@@ -513,7 +686,7 @@ async def lista_modelos():
 async def arrancar_equipo():
     """
     Envía un magic packet Wake-on-LAN para arrancar el equipo de IA.
-    Incrementa el contador peticions_ollama.
+    Incrementa el contador peticions_ollama y cancela cualquier apagado programado (closing_datetime=null).
     Primero verifica si el equipo ya está encendido.
     Requiere API Key en header X-API-Key.
     """
@@ -530,9 +703,13 @@ async def arrancar_equipo():
         new_peticions = current_status.get("peticions_ollama", 0) + 1
 
         if equipo_online:
-            # Actualizar estado: equipo ya online, incrementar contador
+            # Actualizar estado: equipo ya online, incrementar contador, cancelar apagado programado
             await update_status(
-                updates={"peticions_ollama": new_peticions, "phisical_on": True},
+                updates={
+                    "peticions_ollama": new_peticions,
+                    "phisical_on": True,
+                    "closing_datetime": None,
+                },
                 message=f"Arrancar: Equip ja encès. Peticions: {new_peticions}",
             )
 
@@ -544,9 +721,9 @@ async def arrancar_equipo():
         # El equipo está apagado, enviar magic packet
         send_magic_packet(IA_MAC, ip_address=WOL_BROADCAST, port=WOL_PORT)
 
-        # Actualizar estado: WOL enviado, incrementar contador
+        # Actualizar estado: WOL enviado, incrementar contador, cancelar apagado programado
         await update_status(
-            updates={"peticions_ollama": new_peticions},
+            updates={"peticions_ollama": new_peticions, "closing_datetime": None},
             message=f"Arrancar: Magic packet enviat. Peticions: {new_peticions}",
         )
 
@@ -566,14 +743,14 @@ async def arrancar_equipo():
 )
 async def apagar_equipo():
     """
-    Gestiona el apagado del equipo con sistema de contador de peticiones.
+    Gestiona el apagado del equipo con sistema de contador de peticiones y delay.
     - Decrementa el contador peticions_ollama
-    - Solo apaga físicamente si peticions_ollama < 1
-    - Respeta permanent_on: si está en true, no apaga físicamente aunque peticions_ollama < 1
-    - Actualiza logical_on y phisical_on a false solo si se envía señal de apagado físico
+    - Si peticions_ollama llega a 0 y permanent_on está desactivado:
+      * Calcula closing_datetime = datetime actual + DELAY_MINUTS_APAGAR
+      * El scheduler en background se encargará del apagado físico cuando llegue el momento
+    - NO apaga físicamente de forma inmediata
     Requiere API Key en header X-API-Key.
     """
-    ssh = None
     try:
         # Leer el estado actual
         current_status = await read_status()
@@ -584,13 +761,14 @@ async def apagar_equipo():
         )
 
         if not equipo_online:
-            # Equipo ya apagado, decrementar contador (mínimo 0)
+            # Equipo ya apagado, decrementar contador (mínimo 0) y limpiar closing_datetime
             new_peticions = max(0, current_status.get("peticions_ollama", 0) - 1)
             await update_status(
                 updates={
                     "peticions_ollama": new_peticions,
                     "phisical_on": False,
                     "logical_on": False,
+                    "closing_datetime": None,
                 },
                 message=f"Apagar: Equip ja apagat. Peticions: {new_peticions}",
             )
@@ -599,120 +777,61 @@ async def apagar_equipo():
                 success=True,
                 mensaje=f"L'equip ja està apagat. Peticions Ollama: {new_peticions}",
             )
-        else:
-            # Decrementar contador de peticiones (mínimo 0)
-            new_peticions = max(0, current_status.get("peticions_ollama", 0) - 1)
+
+        # Equipo online: decrementar contador de peticiones (mínimo 0)
+        new_peticions = max(0, current_status.get("peticions_ollama", 0) - 1)
         permanent_on = current_status.get("permanent_on", False)
 
-        # Determinar si se debe apagar físicamente
-        should_shutdown_physically = (new_peticions < 1) and (not permanent_on)
+        # Determinar closing_datetime según las condiciones
+        closing_datetime = None
 
-        if not should_shutdown_physically:
-            # No apagar físicamente, solo actualizar contador
+        if new_peticions == 0 and not permanent_on:
+            # Calcular el momento de apagado programado
+            from datetime import timedelta
+
+            now = datetime.utcnow()
+            closing_datetime = (now + timedelta(minutes=DELAY_MINUTS_APAGAR)).isoformat() + "Z"
+
+            await update_status(
+                updates={
+                    "peticions_ollama": new_peticions,
+                    "closing_datetime": closing_datetime,
+                },
+                message=f"Apagar: Apagat programat en {DELAY_MINUTS_APAGAR} minuts. Peticions: {new_peticions}",
+            )
+
+            return MessageResponse(
+                success=True,
+                mensaje=f"Comptador decrementat a {new_peticions}. Apagat físic programat en {DELAY_MINUTS_APAGAR} minuts.",
+            )
+        else:
+            # No programar apagado: hay peticiones activas o permanent_on está activado
             reason = (
                 "permanent_on activat"
                 if permanent_on
                 else f"hi ha {new_peticions} petició(ns) activa(es)"
             )
+
             await update_status(
-                updates={"peticions_ollama": new_peticions},
-                message=f"Apagar: No s'apaga físicament ({reason}). Peticions: {new_peticions}",
+                updates={
+                    "peticions_ollama": new_peticions,
+                    "closing_datetime": None,
+                },
+                message=f"Apagar: No es programa apagat ({reason}). Peticions: {new_peticions}",
             )
 
             return MessageResponse(
                 success=True,
-                mensaje=f"Comptador decrementat a {new_peticions}. No s'apaga físicament: {reason}",
+                mensaje=f"Comptador decrementat a {new_peticions}. No es programa apagat: {reason}",
             )
-
-        # Apagar físicamente el equipo
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-        ssh.connect(
-            hostname=EQUIPO_IA,
-            port=SSH_PORT,
-            username=SSH_USER,
-            password=SSH_PASS,
-            timeout=5,
-        )
-
-        # Ejecutar shutdown con sudo usando la contraseña desde SSH_SUDO_PASS
-        # Usa sudo -S para leer la contraseña desde stdin
-        shutdown_command = f'echo "{SSH_SUDO_PASS}" | sudo -S shutdown -h now'
-        stdin, stdout, stderr = ssh.exec_command(shutdown_command)
-
-        # Esperar un momento para que el comando se procese
-        exit_status = stdout.channel.recv_exit_status()
-        error_output = stderr.read().decode("utf-8", errors="ignore").strip()
-        std_output = stdout.read().decode("utf-8", errors="ignore").strip()
-
-        ssh.close()
-
-        # Si el comando con sudo falló, intentar sin sudo como respaldo
-        if exit_status != 0:
-            try:
-                ssh = paramiko.SSHClient()
-                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                ssh.connect(
-                    hostname=EQUIPO_IA,
-                    port=SSH_PORT,
-                    username=SSH_USER,
-                    password=SSH_PASS,
-                    timeout=5,
-                )
-
-                stdin, stdout, stderr = ssh.exec_command("shutdown -h now")
-                exit_status2 = stdout.channel.recv_exit_status()
-
-                ssh.close()
-
-                if exit_status2 != 0:
-                    error_msg = f"Error en executar shutdown. Sortida: {std_output}. Error: {error_output}"
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail=error_msg,
-                    )
-            except HTTPException:
-                raise
-            except Exception as e2:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Sudo ha fallat i shutdown sense sudo també: {error_output}. {str(e2)}",
-                )
-
-        # Actualizar estado: apagado físico enviado
-        await update_status(
-            updates={
-                "peticions_ollama": new_peticions,
-                "logical_on": False,
-                "phisical_on": False,
-            },
-            message=f"Apagar: Apagat físic enviat. Peticions: {new_peticions}",
-        )
-
-        return MessageResponse(
-            success=True,
-            mensaje=f"Apagat físic enviat. Peticions: {new_peticions}. L'equip s'apagarà aviat.",
-        )
 
     except HTTPException:
         raise
-    except paramiko.AuthenticationException:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Error d'autenticació SSH. Verifica SSH_USER i SSH_PASS",
-        )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error en apagar equip via SSH: {str(e)}",
+            detail=f"Error en processar apagat: {str(e)}",
         )
-    finally:
-        if ssh:
-            try:
-                ssh.close()
-            except:
-                pass
 
 
 @app.post(
@@ -724,11 +843,12 @@ async def permanent_on_enable():
     """
     Activa el modo permanent_on.
     Cuando está activado, el equipo NO se apagará físicamente aunque peticions_ollama sea < 1.
+    Cancela cualquier apagado programado.
     Requiere API Key en header X-API-Key.
     """
     try:
         await update_status(
-            updates={"permanent_on": True},
+            updates={"permanent_on": True, "closing_datetime": None},
             message="Permanent_on activat: l'equip no s'apagarà automàticament",
         )
 
@@ -775,7 +895,8 @@ async def permanent_on_disable():
 async def get_status():
     """
     Obtiene el estado actual del sistema desde status.json.
-    Muestra logical_on, phisical_on, peticions_ollama, permanent_on, message y datetime.
+    Muestra logical_on, phisical_on, peticions_ollama, permanent_on, message, datetime y closing_datetime.
+    El campo closing_datetime indica la hora prevista de apagado automático (null si no hay apagado programado).
     Requiere API Key en header X-API-Key.
     """
 
@@ -797,6 +918,7 @@ async def init_status():
     - Verifica si Ollama está respondiendo (logical_on)
     - Resetea peticions_ollama a 0
     - Resetea permanent_on a false
+    - Resetea closing_datetime a null
     Útil para sincronizar el estado después de un reinicio del servidor o cambios manuales.
     Requiere API Key en header X-API-Key.
     """
@@ -847,6 +969,7 @@ async def init_status():
                 "phisical_on": equipo_online,
                 "peticions_ollama": 0,
                 "permanent_on": False,
+                "closing_datetime": None,
             },
             message=mensaje,
         )
@@ -870,95 +993,41 @@ async def init_status():
 async def shutdown_force():
     """
     Apagado forzado del equipo.
-    Resetea el estado completo: permanent_on=false, logical_on=false, phisical_on=false, peticions_ollama=0
-    y envía comando de apagado físico via SSH.
+    Resetea el estado completo: permanent_on=false, logical_on=false, phisical_on=false,
+    peticions_ollama=0, closing_datetime=null y envía comando de apagado físico via SSH
+    inmediatamente (sin delay).
     Requiere API Key en header X-API-Key.
     """
-    ssh = None
     try:
-        # Verificar si el equipo está online
-        equipo_online = await check_host_connectivity(
-            EQUIPO_IA, port=int(SSH_PORT), timeout=2.0
-        )
+        # Ejecutar apagado físico usando la función reutilizable
+        result = await execute_physical_shutdown()
 
-        if not equipo_online:
-            # Equipo ya apagado, solo resetear estado
+        if not result["success"]:
+            # Si falla el apagado (ej: equipo ya apagado), resetear estado igualmente
             await update_status(
                 updates={
                     "permanent_on": False,
                     "logical_on": False,
                     "phisical_on": False,
                     "peticions_ollama": 0,
+                    "closing_datetime": None,
                 },
-                message="Shutdown forçat: Equip ja estava apagat, estat resetejat",
+                message=f"Shutdown forçat: {result['mensaje']}. Estat resetejat",
             )
 
             return MessageResponse(
                 success=True,
-                mensaje="L'equip ja està apagat. Estat resetejat completament.",
+                mensaje=f"{result['mensaje']}. Estat resetejat completament.",
             )
 
-        # Equipo está encendido, proceder con apagado forzado
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-        ssh.connect(
-            hostname=EQUIPO_IA,
-            port=SSH_PORT,
-            username=SSH_USER,
-            password=SSH_PASS,
-            timeout=5,
-        )
-
-        # Ejecutar shutdown con sudo
-        shutdown_command = f'echo "{SSH_SUDO_PASS}" | sudo -S shutdown -h now'
-        stdin, stdout, stderr = ssh.exec_command(shutdown_command)
-
-        exit_status = stdout.channel.recv_exit_status()
-        error_output = stderr.read().decode("utf-8", errors="ignore").strip()
-        std_output = stdout.read().decode("utf-8", errors="ignore").strip()
-
-        ssh.close()
-
-        # Si el comando con sudo falló, intentar sin sudo
-        if exit_status != 0:
-            try:
-                ssh = paramiko.SSHClient()
-                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                ssh.connect(
-                    hostname=EQUIPO_IA,
-                    port=SSH_PORT,
-                    username=SSH_USER,
-                    password=SSH_PASS,
-                    timeout=5,
-                )
-
-                stdin, stdout, stderr = ssh.exec_command("shutdown -h now")
-                exit_status2 = stdout.channel.recv_exit_status()
-
-                ssh.close()
-
-                if exit_status2 != 0:
-                    error_msg = f"Error en executar shutdown. Sortida: {std_output}. Error: {error_output}"
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail=error_msg,
-                    )
-            except HTTPException:
-                raise
-            except Exception as e2:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Sudo ha fallat i shutdown sense sudo també: {error_output}. {str(e2)}",
-                )
-
-        # Actualizar estado: todo reseteado
+        # Apagado exitoso, resetear estado
         await update_status(
             updates={
                 "permanent_on": False,
                 "logical_on": False,
                 "phisical_on": False,
                 "peticions_ollama": 0,
+                "closing_datetime": None,
             },
             message="Shutdown forçat: Apagat físic enviat, estat completament resetejat",
         )
@@ -970,22 +1039,11 @@ async def shutdown_force():
 
     except HTTPException:
         raise
-    except paramiko.AuthenticationException:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Error d'autenticació SSH. Verifica SSH_USER i SSH_PASS",
-        )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error en executar shutdown forçat: {str(e)}",
         )
-    finally:
-        if ssh:
-            try:
-                ssh.close()
-            except:
-                pass
 
 
 # ===== ENDPOINTS DE PROXY A OLLAMA =====
